@@ -2783,7 +2783,12 @@ int s2a_tmem_get(uint32_t h, uint64_t *addr, uint64_t *size, uint32_t *perm) {
 }
 uint32_t s2a_thread_current(void) { thr_t *t = thread_current_or_null(); return t ? t->handle : 0; }
 
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+// 安卓暂无与 Apple 对等的 stop/parking 边界；session.c:702 无条件调用本函数，
+// 缺定义时 game 模式链接失败。返回 0 让进程内重启走「缺少客体线程安全退出边界」
+// 的失败关闭路径，而不是链不上。见 PR #15。
+int s2a_thread_restart_supported(void) { return 0; }
+#elif defined(__APPLE__)
 int s2a_thread_restart_supported(void) {
     // Capability is queried before the first guest registers its thread keys.
     // Initialize the actual idempotent stop boundary before inspecting it.
