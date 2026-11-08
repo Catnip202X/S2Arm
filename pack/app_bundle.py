@@ -258,9 +258,10 @@ def _zip_entry(name, directory, executable=False):
     return entry
 
 
-# 非 zip64 归档的物理上限（条目数 / 字节数）：侧载工具不认 zip64（见下面的注释），超了 zipfile 在收尾时才抛
-#   LargeZipFile——它不是 OSError，调用方（pack/ipa_tail.py 的「打 ipa」步）只看到「打 ipa 失败」，玩家的错误码只能落到
-#   package_failed「原因没认出来」（11-08 反馈：9.78 GB 的 PERSONA4 The GOLDEN 停在出包 2/5、错误码 package_failed）。
+# 非 zip64 归档的物理上限（条目数 / 字节数）：侧载工具不认 zip64（见下面的注释），超了 zipfile 在写条目 / 收尾时才抛
+#   LargeZipFile——它不是 OSError，调用方（pack/ipa_tail.py 的「打 ipa」步）原先把整段原因丢掉，玩家的错误码只能落到
+#   package_failed「原因没认出来」（#11：9.78 GB 的 PERSONA4 The GOLDEN 停在出包 2/5）。那单的具体原因是哪一条以红行原文为准，
+#   这里只负责：真撞到上限时给一条读得懂的红行，不落成裸 traceback。
 ZIP32_MAX = zipfile.ZIP64_LIMIT              # 单条 / 整份字节上限（2 GiB − 1）
 ZIP32_ENTRIES = zipfile.ZIP_FILECOUNT_LIMIT  # 条目数上限（65535）
 
