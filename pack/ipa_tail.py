@@ -190,19 +190,34 @@ def assemble(a):
     return ipa
 
 
+def runtime_only_lib(d):
+    """抽取缺口出的空直连库（graphics/tools/direct/runtime_only_lib.sh 出，pack/stage_direct.sh 落进产物根）：
+    runtime_only.txt + 空的 shader_map.tsv + 每个 b-<链>/ 的 lib.idx / inputs.tsv。这是一份合法的库——离线 0 支，宿主首遇现编
+    （运行时判定看 b-<链> + shader_map.tsv + lib.idx，见 runtime_only_lib.sh 头注）；空 keys.tsv / shader_map.tsv 是它的正常形态，
+    不能按「直连库不全」判红（#11：9.78 GB 的 PERSONA4 The GOLDEN 抽取缺口走这条路，出包被这一步挡死）。"""
+    if not os.path.isfile(os.path.join(d, 'runtime_only.txt')): return False
+    if not os.path.isfile(os.path.join(d, 'shader_map.tsv')): return False   # 宿主判直连起手要的三样之一（另外两样在 b-<链>/ 里）
+    chains = sorted(glob.glob(os.path.join(glob.escape(d), 'b-*')))
+    return bool(chains) and all(os.path.isfile(os.path.join(c, n)) for c in chains for n in ('lib.idx', 'inputs.tsv'))
+
+
 def check_pack_inputs(w, g):
     """资源包要件（资源包根 = 游戏数据目录：exefs/main.npdm、romfs/、ctl/control.nacp；起局把 S2A_GAME_DATA 指到 Documents/资源包）"""
     if not os.path.isfile(os.path.join(w, 'exefs', 'main.npdm')): raise Red('产物根没有 exefs/main.npdm')
     if not os.path.isfile(os.path.join(w, 'ctl', 'control.nacp')): print(f'【黄】{g} 产物根没有 ctl/control.nacp（游戏标题 / 存档参数读不到，服务层会报红）')
     if not os.path.isdir(os.path.join(w, 'systemdata', 'fonts')): raise Red(f'产物根没有 systemdata/fonts（先 pack/stage_sysdata.sh {g}）')
     d = os.path.join(w, 'shaders', 'direct')
-    if not pkg_srcs.nonempty(os.path.join(d, 'keys.tsv')) and not pkg_srcs.nonempty(os.path.join(d, 'gl', 'gl_shaders.tsv')):
+    runtime_only = runtime_only_lib(d)
+    if not pkg_srcs.nonempty(os.path.join(d, 'keys.tsv')) and not pkg_srcs.nonempty(os.path.join(d, 'gl', 'gl_shaders.tsv')) and not runtime_only:
         try: dl = [l for l in open(os.path.join(w, 'direct_lib.log'), encoding='utf-8', errors='replace').read().splitlines() if '直连库]' in l]
         except OSError: dl = []
         print(f'🟡 {g} 资源包没带直连库（产物根没有 shaders/direct/keys.tsv：{dl[-1][:160] if dl else "早装件或直连库阶段未产出"}）；装上起局会报「游戏文件缺失」，要装带直连库的正式包')
-    if glob.glob(os.path.join(glob.escape(d), 'b-*')):   # 带 b-<链>/ 就必须同时有 keys.tsv 与 shader_map.tsv（App 判直连起手看 b-<链>/）
+    elif runtime_only:   # 空库照常进包：宿主按直连起，没编过的着色器首遇现编（新场景第一次会卡一下）
+        print(f'🟡 {g} 本款离线直连库为空（抽取缺口，见产物根 shaders/direct/runtime_only.txt）：着色器运行时现编，新场景首次遇到会卡一下')
+    chains = sorted(glob.glob(os.path.join(glob.escape(d), 'b-*')))
+    if chains and not runtime_only:   # 带 b-<链>/ 就必须同时有 keys.tsv 与 shader_map.tsv（App 判直连起手看 b-<链>/）；空库由 runtime_only_lib 那一支认
         if not (pkg_srcs.nonempty(os.path.join(d, 'keys.tsv')) and pkg_srcs.nonempty(os.path.join(d, 'shader_map.tsv'))):
-            raise Red(f'直连库不全：有 {os.path.basename(sorted(glob.glob(os.path.join(glob.escape(d), "b-*")))[0])}/，缺 keys.tsv 或 shader_map.tsv（直连库阶段重出）')
+            raise Red(f'直连库不全：有 {os.path.basename(chains[0])}/，缺 keys.tsv 或 shader_map.tsv（直连库阶段重出）')
 
 
 def main():
