@@ -420,6 +420,35 @@ static void screen_fps_note(NSWindow *w) {
     if (@available(macOS 12.0, *)) hz = (int)sc.maximumFramesPerSecond;
     if (atomic_exchange(&g_screen_max_fps, hz) != hz) fprintf(stderr, "[s2a] 窗口所在屏最高刷新 %d Hz\n", hz);
 }
+// 出图栅格（S2A_OUT_SIZE=WxH | native | fit，缺省 native）：WxH 是像素预算，折算规则在 graphics/nvn/gfx/nvn/nvn_present_fit.h
+//   （pf_out_raster：比例对得上就原样，对不上按窗口比例取等像素尺寸——层始终铺满视图，比例不变、可画尺寸里不留黑边）。
+//   读不出 / 越界时按窗口像素出图并报一次红；每次栅格变化打一行日志（局内改分辨率时手上要有读数）。
+static void out_raster(CGFloat vw, CGFloat vh, CGSize px, int *ow, int *oh) {
+    *ow = (int)px.width; *oh = (int)px.height;
+    const char *e = getenv("S2A_OUT_SIZE");
+    if (!e || !*e || !strcmp(e, "native") || !strcmp(e, "fit")) return;
+    int w = 0, h = 0;
+    if (sscanf(e, "%dx%d", &w, &h) != 2 || w < 1 || h < 1 || w > 16384 || h > 16384) {
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1)) fprintf(stderr, "[s2a] 【红】 S2A_OUT_SIZE=%s 不认（要 WxH / native / fit），本次按窗口像素出图\n", e);
+        return;
+    }
+    int rw = w, rh = h, scaled = pf_out_raster(w, h, (double)vw, (double)vh, &rw, &rh);
+    if (rw < 1 || rh < 1) { *ow = (int)px.width; *oh = (int)px.height; return; }
+    static int told_w = -1, told_h = -1;
+    if (rw != told_w || rh != told_h) {
+        told_w = rw; told_h = rh;
+        fprintf(stderr, "[s2a] 出图栅格 %dx%d（S2A_OUT_SIZE=%s，窗口 %gx%g 点%s）\n", rw, rh, e, (double)vw, (double)vh, scaled ? "，按窗口比例取等像素尺寸" : "");
+    }
+    *ow = rw; *oh = rh;
+}
+static S2AMetalView *g_game_view;   // 游戏窗口的视图（建窗时填；运行中改栅格要它重摆）
+// 运行中改输出栅格（runtime/src/display_ctl.c 经 dlsym 调）：S2A_OUT_SIZE 已经由它写好，这里只让视图按新值重摆一次（主线程）
+void s2a_mac_relayout(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_game_view) [g_game_view setNeedsLayout:YES];
+    });
+}
 @implementation S2AMetalView
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
@@ -429,8 +458,11 @@ static void screen_fps_note(NSWindow *w) {
     CAMetalLayer *metal = (CAMetalLayer *)self.layer;
     metal.contentsScale = self.window.backingScaleFactor ?: 1;
     CGSize size = CGSizeMake(self.bounds.size.width * metal.contentsScale, self.bounds.size.height * metal.contentsScale);
-    if (size.width >= 1 && size.height >= 1) metal.drawableSize = size;   // 直连模式没有 NxGal 跟窗口尺寸，层的可画尺寸在这里跟上
-    nxgal_window_set_size((int32_t)size.width, (int32_t)size.height);
+    // 出图栅格：窗口像素（缺省）或 S2A_OUT_SIZE 给的像素预算（按窗口比例）。层始终铺满视图，比例因此不变、不留黑边
+    int ow = 0, oh = 0; out_raster(self.bounds.size.width, self.bounds.size.height, size, &ow, &oh);
+    CGSize raster = ow > 0 && oh > 0 ? CGSizeMake(ow, oh) : size;
+    if (raster.width >= 1 && raster.height >= 1) metal.drawableSize = raster;   // 直连模式没有 NxGal 跟窗口尺寸，层的可画尺寸在这里跟上
+    nxgal_window_set_size((int32_t)raster.width, (int32_t)raster.height);
     // 宽屏跟窗口比例（审计 P1-83：原先从不换屏幕宽，拉宽 / 全屏后逻辑分辨率仍 1920×1080、两侧黑；维护者 任何比例都满屏）：同 iOS 口径换屏，
     //   直连第三层下一个渲染遍前按新比例重出图（runtime/src/widen.c s2a_screen_fit，钉了原生 16:9 / 环境变量给定屏幕时不跟）
     if (size.width >= 1 && size.height >= 1) s2a_screen_fit((int)size.width, (int)size.height);
@@ -639,6 +671,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         S2AMetalView *view = [[S2AMetalView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
         view.wantsLayer = YES; CAMetalLayer *layer = [CAMetalLayer layer]; layer.opaque = YES;
         view.layer = layer; window.contentView = view; window.acceptsMouseMovedEvents = YES;
+        g_game_view = view;
         delegate.window = window;
         screen_fps_note(window);
         [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidChangeScreenNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { screen_fps_note(n.object); }];

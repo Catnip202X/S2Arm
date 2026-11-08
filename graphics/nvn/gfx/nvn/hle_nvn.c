@@ -3289,8 +3289,10 @@ static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fst
 // Each frame's critical path starts where its submits began: the present call less the submits' wall time that frame (the DM_NVN_TSV @call_ms − @sub_wall_ms), kept per frame until its GPU work is done
 static struct { uint64_t f, t; } g_cpath[16];
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
+// 这一帧是否按「未锁帧 + 上限 > 60」出图（present_itv 每帧写；浮层与标称帧率据此报上限）
+static _Atomic int g_fps_unlocked;
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; if (g_hz > 0 && video_cap()) return 30; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { if (atomic_load(&g_fps_unlocked)) { int cap = nvn_fps_limit(); if (cap > 60) return cap; } int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; if (g_hz > 0 && video_cap()) return 30; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -3314,9 +3316,12 @@ __attribute__((weak)) void s2a_qp_frame(uint32_t draws, int video, int cutscene,
 static _Atomic int g_fps_game_itv;   // 这一帧按游戏自己设的间隔（不走 display 模式）
 static int present_itv(const win_t *o) {   // vsyncs per frame that presentation follows
     int c = fps_step_cap(), k = atomic_load(&g_fs_k);
-    if (c) return k && fstep_on() ? k : 60 / c;
-    int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : o->interval > 0 ? o->interval : 1;
-    return itv < 2 && g_hz > 0 && video_cap() ? 2 : itv;   // 放 ≤ 30 帧视频：至少隔 2 拍（60 Hz 节拍下 30 帧）
+    if (c) { atomic_store(&g_fps_unlocked, 0); return k && fstep_on() ? k : 60 / c; }
+    // 游戏自己不锁帧（交换间隔 0）且上限高于 60：按 0 拍出图，周期由 present_period 取 1/上限（上限 ≤ 60 或锁帧游戏维持原样 = 1 拍）
+    int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : o->interval > 0 ? o->interval : (nvn_fps_limit() > 60 ? 0 : 1);
+    int fin = itv < 2 && g_hz > 0 && video_cap() ? 2 : itv;   // 放 ≤ 30 帧视频：至少隔 2 拍（60 Hz 节拍下 30 帧）
+    atomic_store(&g_fps_unlocked, fin == 0);
+    return fin;
 }
 // S2Arm 标称帧率（自动玩家折算路线帧数；host_adapt.m 每次上屏报给原生层 s2a_nominal_fps_set）：出图实际跟的节拍 = 节拍频率 / present_itv，任意线程可调。
 //   与 nvn_game_fps（显示链接的频率）只差在 display 模式这一帧退回游戏间隔时（帧率表运行中关 / 过热封顶，g_fps_game_itv）：显示链接仍 60 Hz、出图却隔 interval 拍一帧，这里按游戏间隔给。
@@ -3324,6 +3329,7 @@ static int present_itv(const win_t *o) {   // vsyncs per frame that presentation
 int nvn_present_fps(void) {
     int c = fps_step_cap(), hz = g_hz > 0 ? g_hz : 60;
     if (c) { int k = atomic_load(&g_fs_k); return hz / (k && fstep_on() ? k : 60 / c); }
+    if (atomic_load(&g_fps_unlocked)) { int cap = nvn_fps_limit(); return cap > 60 ? cap : hz; }   // 未锁帧按上限出图：标称帧率就是上限
     if (g_hz > 0 && video_cap()) { int itv = atomic_load(&g_game_itv); return hz / (itv > 2 && !g_display_mode ? itv : 2); }
     if (g_display_mode && !atomic_load(&g_fps_game_itv)) return hz;
     uint64_t s = atomic_load(&g_itv2_since); int itv = atomic_load(&g_game_itv);

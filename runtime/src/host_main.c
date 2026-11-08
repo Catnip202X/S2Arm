@@ -326,6 +326,9 @@ static int host_run(int argc, char **argv) {
     { void s2a_caps_apply(const char *); s2a_caps_apply(dir); }
     // 图形模式在构造函数里（地址窗口取程序号）就判定了，那时模块目录还空，程序号读成 0：目录已知后重读（DM_GAME_ID、wire/<程序号> 都靠它）
     { void s2a_module_dir_set(const char *), s2a_npdm_program_id_reload(void); s2a_module_dir_set(dir); s2a_npdm_program_id_reload(); }
+    // 包内显示默认值（产物根 s2a_display.tsv，出包时选的刷新率上限 / 输出栅格）：同 caps 一样只在环境变量未设时写，
+    //   所以启动环境与玩家设置都优先。要早于装载（宽屏 / 帧步在装载时读 S2A_FPS），排在能力清单后
+    { int s2a_display_cfg_apply(const char *); s2a_display_cfg_apply(dir); }
 #endif
     g_module_dir = strdup(dir); g_module_count = n;
     if (!g_module_dir) die("模块路径分配失败");

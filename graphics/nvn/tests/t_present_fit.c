@@ -3,6 +3,7 @@
 // 期望值全部手算（不跑被测实现）：
 //   裁剪超出源 → 取裁剪框落在源内的部分，从裁剪起点按 16:9 修整（宽于 16:9 留高、窄于 16:9 留宽）；源够大 → 原样；非法 → -1。
 //   视口：s = min(dw/cw, dh/ch)，x = floor((dw − cw·s)/2)，y = floor((dh − ch·s)/2)，w = round(cw·s)，h = round(ch·s)；与屏比例差 < 1% 铺满。
+//   出图栅格：比例差 ≤ 1% 原样用预算尺寸；否则按视图比例取等像素尺寸（hh = √(预算像素 / 比例)，ww = hh·比例），越界 / 预算非法 → 不改。
 #include "../gfx/nvn/nvn_present_fit.h"
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +18,12 @@ static void crop_case(const char *name, int x, int y, int w, int h, int sw, int 
           "%s：裁剪 %d,%d %dx%d / 源 %dx%d 期望 返回 %d、%d,%d %dx%d 实得 返回 %d、%d,%d %dx%d",
           name, x, y, w, h, sw, sh, want_rc, ex, ey, ew, eh, rc, out[0], out[1], out[2], out[3]);
     if (rc == 1) CHECK((uint64_t)out[0] + out[2] <= (uint64_t)sw && (uint64_t)out[1] + out[3] <= (uint64_t)sh, "%s：规整后仍越界", name);
+}
+static void raster_case(const char *name, int bw, int bh, double vw, double vh, int ex, int ey, int esc) {
+    int w = -7, h = -7;
+    int sc = pf_out_raster(bw, bh, vw, vh, &w, &h);
+    CHECK(sc == esc && w == ex && h == ey, "%s：预算 %dx%d 放进 %gx%g 期望 折算%d、%dx%d 实得 折算%d、%dx%d",
+          name, bw, bh, vw, vh, esc, ex, ey, sc, w, h);
 }
 static void vp_case(const char *name, double dw, double dh, double cw, double ch, double ex, double ey, double ew, double eh) {
     pf_vp v = pf_viewport(dw, dh, cw, ch);
@@ -64,6 +71,19 @@ int main(void) {
     CHECK(pf_out_aspect(0, 2346, 1080) == 16.0 / 9.0, "出图层比例：没放宽 期望 16:9 实得 %f", pf_out_aspect(0, 2346, 1080));
     //   Duo 视图 951x669 点（2853x2007 像素 ÷ 3）放 1.422222 的层：951 / 669 = 1.421525，差 0.05% → 铺满 0,0 951x669
     vp_case("出图层：Duo 加高比例铺满视图", 951, 669, pf_out_aspect(1, 1920, 1350), 1, 0, 0, 951, 669);
+    // ⑨ 出图栅格（front_mac.m out_raster → pf_out_raster）：WxH 是像素预算，按窗口比例取等像素尺寸，层始终铺满视图
+    //   16:9 窗口打 2560x1440：比例一致（差 0%）→ 原样
+    raster_case("出图栅格：16:9 窗口 2560x1440 原样", 2560, 1440, 1920, 1080, 2560, 1440, 0);
+    //   16:10 窗口 1470x956（1470/956 = 1.537657）：3 686 400 像素 ÷ 1.537657 → hh = 1548.3584 → 2380.8441 → 四舍五入 2381x1548（像素数 3 685 788，误差 0.017%）
+    raster_case("出图栅格：16:10 窗口按比例折算", 2560, 1440, 1470, 956, 2381, 1548, 1);
+    //   21:9 窗口 3440x1440 打 1920x1080：2 073 600 ÷ 2.388889 → hh = 931.6752 → 2225.6684 → 2226x932（2 074 632 像素）
+    raster_case("出图栅格：21:9 窗口折算", 1920, 1080, 3440, 1440, 2226, 932, 1);
+    //   4:3 窗口 1024x768 打 1280x720：921 600 ÷ 1.333333 → hh = 831.3844 → 1108.5125 → 1109x831
+    raster_case("出图栅格：4:3 窗口折算", 1280, 720, 1024, 768, 1109, 831, 1);
+    //   预算非法 / 视图尺寸无效：不改、返回 0（调用方退回窗口像素）
+    raster_case("出图栅格：预算 0 不改", 0, 1440, 1470, 956, 0, 1440, 0);
+    raster_case("出图栅格：预算超上限不改", 20000, 1440, 1470, 956, 20000, 1440, 0);
+    raster_case("出图栅格：视图 0 宽不改", 2560, 1440, 0, 956, 2560, 1440, 0);
     printf("%s t_present_fit：直连上屏裁剪规整 + 等比视口 %d 项 → %s\n", g_bad ? "✗" : "✓", g_n, g_bad ? "有不符合项" : "全过");
     return g_bad != 0;
 }

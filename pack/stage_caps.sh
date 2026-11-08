@@ -27,9 +27,17 @@ fi
 #   判定代码与登记表（caps_policy / caps_ledger / profile_guess 及其导入、名单_*.tsv）按实际读入进键，不再手工列（10-30 根修：名单永远落后于代码）
 #   能力的宿主实现文件（caps_policy SIGNAL_IMPL：caps.c / widen.c / nvn_mtl.m …）同理：caps_policy 只按去注释、去日志文本的判定文本读它们，
 #   那份判定文本已由下面的强信号失效键（signal-hash）进键；按原始字节再整份记，改一行注释就整段重出清单（10-31 出包线：马车8 只改 caps.c 一行注释，清单重出 46 秒）
+# 出包时选的显示默认值（刷新率上限 / 输出栅格；pack/jobs/build.py 从请求的 display 字段传进来）：
+#   只有 macos 包带 s2a_display.tsv（iOS 出图层仍是屏幕原生像素）；未指定就不写、也不进键，产物与原先逐字节相同。
+DR=${S2A_DISPLAY_REFRESH:-}; DO=${S2A_DISPLAY_OUT:-}
+case "${DR:-}" in ''|off|display|[0-9]*) ;; *) echo "【红】$G 显示选项 refresh=${DR} 不认（off / display / 24–1000）"; exit 1;; esac
+case "${DR:-}" in [0-9]*) [ "${DR}" -ge 24 ] && [ "${DR}" -le 1000 ] || { echo "【红】$G 显示选项 refresh=${DR} 不在 24–1000"; exit 1; };; esac
+case "${DO:-}" in ''|native|fit) ;; [0-9]*x[0-9]*) ;; *) echo "【红】$G 显示选项 out_size=${DO} 不认（native / fit / WxH）"; exit 1;; esac
+DISP=-
+[ "${S2A_PACK_PLAT:-ios}" = macos ] && [ -n "$DR$DO" ] && DISP="${DR:-none}|${DO:-none}"
 SIF=$("$PY" "$R/tools/caps_policy.py" signal-files --target "$TGT") && [ -n "$SIF" ] || { echo "【红】$G 取不到能力实现文件清单（tools/caps_policy.py signal-files --target ${TGT}）"; exit 1; }
 export S2A_DEPS_KEYED=docs/名单_验证账.tsv:$SIF
-K=$({ grep -i "^$PID	" "$R/docs/名单_验证账.tsv" 2> /dev/null; echo "rewrite=$RWK"
+K=$({ grep -i "^$PID	" "$R/docs/名单_验证账.tsv" 2> /dev/null; echo "rewrite=$RWK"; echo "display=$DISP"
   "$PY" "$R/tools/caps_policy.py" signal-hash --target "$TGT" 2> /dev/null; } | shasum -a 256 | cut -c1-16)   # 强信号失效键（caps_policy SIGNAL_IMPL：满屏 / 60 帧宿主实现 + 数据选择代码，毫秒级）：实现变了，登记的强信号随之失效、清单要重出
 KB=$K; K=$(stage_deps_key "$CUR" caps "$KB" "$SELF" "$R/pack/gen_caps.sh") || exit 1
 root_stage_done "$CUR" caps "$K" && { echo "🟢 $G 现行已是能力清单 ${K}，跳过"; exit 0; }
@@ -43,8 +51,17 @@ fi
 # 两种口径一次判定（gen_caps.sh --both：引擎推导读 RomFS 文件头只做一次，11-03 火纹原先两次各 160 秒）
 S2A_CAPS_TARGET=$TGT bash "$R/pack/gen_caps.sh" "$G" "$W" "$W/s2a_caps.tsv" --both "$W/s2a_caps.all.tsv" > "$W/caps.log" 2>&1 \
   || { echo "【红】$G 生成包内能力清单失败（$(tail -1 "$W/caps.log")）"; root_abort "$G" "$TAG"; exit 1; }
+# 包内显示默认值：数值只由请求决定，不按款写死（通用层零专用配置）；写在能力清单旁边，宿主 runtime/src/display_cfg.c 读
+DV=
+if [ "$DISP" != - ]; then
+  { printf 'plat\tmacos\n# 包内显示默认值（玩家设置与启动环境优先；runtime/src/display_cfg.c 读）\n'
+    [ -n "$DR" ] && printf 'refresh\t%s\t# 出包时选的刷新率上限\n' "$DR"
+    [ -n "$DO" ] && printf 'out_size\t%s\t# 出包时选的输出分辨率\n' "$DO"
+  } > "$W/s2a_display.tsv" || { echo "【红】$G 写包内显示默认值失败"; root_abort "$G" "$TAG"; exit 1; }
+  DV=s2a_display.tsv
+fi
 K=$(stage_deps_save "$W" caps "$KB" "$SELF" "$R/pack/gen_caps.sh") || { root_abort "$G" "$TAG"; exit 1; }
 echo "$K" > "$W/.stage_caps"
 [ "$TGT" = android ] && WV=widen_verified.tsv || WV=   # 安卓标记是本阶段产物：重放到新现行时按它换（苹果那份归改写阶段）
-ROOT_REPLAY="s2a_caps.tsv s2a_caps.all.tsv caps.log .stage_caps .stage_caps.deps $WV" root_commit "$G" "$TAG" || exit 1
-echo "🟢 $G 能力清单（键 ${K}）：$(grep -E '^(widen|fps60)	' "$(root_cur "$G")/s2a_caps.tsv" | cut -f1,2 | tr '\t\n' '= ')"
+ROOT_REPLAY="s2a_caps.tsv s2a_caps.all.tsv caps.log .stage_caps .stage_caps.deps $WV $DV" root_commit "$G" "$TAG" || exit 1
+echo "🟢 $G 能力清单（键 ${K}）：$(grep -E '^(widen|fps60)	' "$(root_cur "$G")/s2a_caps.tsv" | cut -f1,2 | tr '\t\n' '= ')$([ -n "$DV" ] && printf '；显示默认值 %s' "$(grep -vE '^#|^plat' "$(root_cur "$G")/s2a_display.tsv" | cut -f1,2 | tr '\t\n' '= ')")"

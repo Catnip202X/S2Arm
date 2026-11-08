@@ -16,28 +16,31 @@ namespace S2A.Gfx
 {
     public static class FramePacingPolicy
     {
-        public static int ParseLimit(string configuredValue)
+        // 与 graphics/nvn nvn_fps.c 同一语法：null / 空 / "0" / "off" = 不限；"display" = 跟显示器（读不到速率时按不限 = 0）；24–1000 = 该帧率。
+        //   上限只拉长呈现周期，不会让锁帧游戏变快（同 C 侧 nvn_fps_period）。displayHz 由调用方给（device.TargetVSyncInterval）
+        public static int ParseLimit(string configuredValue, int displayHz = 0)
         {
-            return configuredValue switch
-            {
-                null or "0" => 0,
-                "30" => 30,
-                "60" => 60,
-                "120" => 120,
-                _ => throw new ArgumentOutOfRangeException(nameof(configuredValue), configuredValue, "S2A_FPS must be exactly 0, 30, 60, or 120."),
-            };
+            // 与 C 侧一样：null 与空串都是「不限」（启动器常把 S2A_FPS= 空串摆进环境），其余只认整串
+            if (configuredValue is null || configuredValue.Length == 0) return 0;
+            if (configuredValue != configuredValue.Trim())
+                throw new ArgumentOutOfRangeException(nameof(configuredValue), configuredValue, "S2A_FPS must be exactly 0, off, display, or 24-1000.");
+            if (configuredValue == "off") return 0;
+            if (configuredValue == "display") return displayHz > 0 ? displayHz : 0;
+            if (!int.TryParse(configuredValue, out int fps) || fps < 0 || (fps > 0 && fps < 24) || fps > 1000)
+                throw new ArgumentOutOfRangeException(nameof(configuredValue), configuredValue, "S2A_FPS must be exactly 0, off, display, or 24-1000.");
+            return fps;
         }
 
         public static int SwapIntervalFloor(int fps, long targetVsyncInterval)
         {
-            if (fps is not (0 or 30 or 60 or 120)) throw new ArgumentOutOfRangeException(nameof(fps));
+            if (fps < 0 || (fps > 0 && fps < 24) || fps > 1000) throw new ArgumentOutOfRangeException(nameof(fps));
             if (fps == 0) return 0;
             return Math.Max(1, (int)Math.Round((double)targetVsyncInterval / fps));
         }
 
         public static float MinimumPresentationInterval(float gameIntervalSeconds, int fps)
         {
-            if (fps is not (0 or 30 or 60 or 120)) throw new ArgumentOutOfRangeException(nameof(fps));
+            if (fps < 0 || (fps > 0 && fps < 24) || fps > 1000) throw new ArgumentOutOfRangeException(nameof(fps));
             return fps == 0 ? gameIntervalSeconds : Math.Max(gameIntervalSeconds, 1f / fps);
         }
     }
@@ -57,7 +60,7 @@ namespace S2A.Gfx
         public static void Start(Switch device, MemoryTracking tracking)
         {
             if (_started) throw new InvalidOperationException("渲染循环已启动");
-            int fpsLimit = FramePacingPolicy.ParseLimit(Environment.GetEnvironmentVariable("S2A_FPS"));
+            int fpsLimit = FramePacingPolicy.ParseLimit(Environment.GetEnvironmentVariable("S2A_FPS"), (int)device.TargetVSyncInterval);
             int minSwapInterval = FramePacingPolicy.SwapIntervalFloor(fpsLimit, device.TargetVSyncInterval);
             // 宏执行：NativeAOT（Mac 宿主 / iOS）不支持动态代码，Ryujinx 缺省开的宏 JIT（MacroJitCompiler 用 Reflection.Emit）一跑就抛
             // PlatformNotSupportedException（M0 动森 Mac 渲染线程崩在这）。关掉后走补丁 0004 的离线宏表，没命中落 Ryujinx 解释器

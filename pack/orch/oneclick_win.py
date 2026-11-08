@@ -565,8 +565,12 @@ def main(argv=None):
     ap.add_argument('--check', action='store_true'); ap.add_argument('--from-extract'); ap.add_argument('--events')
     ap.add_argument('--rt-shaders', metavar='DIR')   # 内部验证包：真机转储的着色器并进解包目录（put_rt）；不给 = 不带（缺省行为不变）
     ap.add_argument('--install', metavar='UDID'); ap.add_argument('--name'); ap.add_argument('--suffix'); ap.add_argument('--plumesign'); ap.add_argument('--devpush')
+    ap.add_argument('--display-refresh', metavar='HZ', help='出包默认刷新率上限：off / display / 24–1000（只 mac 目标带这份默认值）')
+    ap.add_argument('--display-out', metavar='WxH', help='出包默认输出分辨率：native / fit / 2560x1440')
     a = ap.parse_args(argv)
     if a.install and a.target != 'ios': ap.error('--install 只用于 --target ios')
+    if a.display_refresh: os.environ['S2A_DISPLAY_REFRESH'] = a.display_refresh   # 与 bash 能力清单阶段同一份环境变量
+    if a.display_out: os.environ['S2A_DISPLAY_OUT'] = a.display_out
     items = env_items(a.target, a.shell)
     bad = [i for i in items if not i[1]]
     if a.check:

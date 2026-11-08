@@ -40,3 +40,23 @@ static inline pf_vp pf_viewport(double dw, double dh, double cw, double ch) {
 // height 1080, narrow screens keep width 1920, so one formula covers both); otherwise 16:9. 11-03 Duo (1920x1350) with the game drawing a taller
 // picture itself: the old width / 1080 gave 1.778 and squeezed the 1280x900 picture into a 16:9 layer with black above and below
 static inline double pf_out_aspect(int widened, int sw, int sh) { return widened && sw > 0 && sh > 0 ? (double)sw / (double)sh : 16.0 / 9.0; }
+
+// 出图栅格（macos/front_mac.m 的 -[S2AMetalView layout]，S2A_OUT_SIZE=WxH | native | fit）：WxH 是像素预算。
+//   窗口比例与 WxH 的比例差 ≤ 1% → 原样用 WxH（16:9 屏上打 2560x1440 就是 2560x1440）；
+//   否则按窗口比例取等像素的尺寸（层始终铺满视图：比例不变、可画尺寸里不留黑边——留边会被 fit 判据记成「画面只占 N/M 像素宽」的缺陷，
+//   拉伸又会被记成变形，两种都让该局的帧率 / 能耗读数变成未测）。合成器只做整数比例的缩放。
+//   返回 1 = 按比例折算过，0 = 原样用 WxH（预算非法 / 视图尺寸无效时也返回 0，由调用方报红并退回窗口像素）。
+static inline int pf_out_raster(int bw, int bh, double vw, double vh, int *w, int *h) {
+    if (w) *w = bw;
+    if (h) *h = bh;
+    if (bw < 1 || bh < 1 || bw > 16384 || bh > 16384 || !(vw > 0) || !(vh > 0)) return 0;   // 预算本身越界：不改，调用方退回窗口像素
+    double want = (double)bw / (double)bh;
+    if (fabs(want / (vw / vh) - 1.0) <= 0.01) return 0;   // 比例本来就对得上：原样
+    double a = vw / vh, target = (double)bw * (double)bh;
+    double hh = sqrt(target / a), ww = hh * a;
+    long rw = lround(ww), rh = lround(hh);
+    if (rw < 1 || rh < 1 || rw > 16384 || rh > 16384) return 0;
+    if (w) *w = (int)rw;
+    if (h) *h = (int)rh;
+    return 1;
+}

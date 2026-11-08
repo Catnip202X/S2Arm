@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shlex
 import shutil
 import stat
@@ -88,6 +89,30 @@ def validate_runtime(c, runtime, full=True):
 def require_automatic_memory(c):
     if "vammLayout" in c.r:
         raise Failure("启动器版本过旧，请更新后重新打包这款游戏。", code="runtime_invalid")
+
+
+def display_env(display):
+    """出包时选的显示默认值（请求的 display 字段）→ 阶段环境变量，pack/stage_caps.sh 据此写包内 s2a_display.tsv。
+    运行时只在环境变量未设时用它（runtime/src/display_cfg.c），所以玩家设置与启动环境仍然优先；没给就不设任何键，
+    产物与原先逐字节相同。值域与宿主解析同口径：refresh = off / display / 24–1000，outSize = native / fit / WxH（单边 1–16384）。"""
+    env = {}
+    if display is None:
+        return env
+    if not isinstance(display, dict):
+        raise Failure("显示选项格式无效。")
+    refresh, out_size = display.get("refresh"), display.get("outSize")
+    if refresh is not None:
+        if not (refresh in ("off", "display") or (isinstance(refresh, str) and re.fullmatch(r"[0-9]{2,4}", refresh) and 24 <= int(refresh) <= 1000)):
+            raise Failure("刷新率选项无效（off / display / 24–1000）。")
+        env["S2A_DISPLAY_REFRESH"] = str(refresh)
+    if out_size is not None:
+        size_ok = out_size in ("native", "fit") or (
+            isinstance(out_size, str) and re.fullmatch(r"[0-9]{1,5}x[0-9]{1,5}", out_size)
+            and all(1 <= int(v) <= 16384 for v in out_size.split("x")))
+        if not size_ok:
+            raise Failure("分辨率选项无效（native / fit / WxH，单边 1–16384）。")
+        env["S2A_DISPLAY_OUT"] = str(out_size)
+    return env
 
 
 def runtime_env(c, game, runtime):
@@ -556,7 +581,8 @@ def prepare(c):
         #   10-30 起直连单轨（维护者）：直连做不成 refresh.sh 报红「直连单轨停在 <哪一步>」退 1，任务按它报红（tool_reason 取日志里的红行），不退成通用；
         #   11-07 兼容模式（只出通用）整条拆掉。tests/pack_entry_test.sh 防回退
         ms.enter(c, "refresh")
-        env.update(S2A_PACK_PLAT="macos", S2A_WIDEN_AUTO_RUN="0", S2A_WIDEN_PKG="0")   # 宽屏自动出表按 iPhone 屏幕比例补画面、要占 Mac 局槽跑闭环；Mac 窗口按 16:9（同 --target mac）
+        env.update(S2A_PACK_PLAT="macos", S2A_WIDEN_AUTO_RUN="0", S2A_WIDEN_PKG="0")
+        env.update(display_env(c.r.get("display")))
         # refresh.sh 链上的追加内容 / 原件核对要原始包、密钥和 nx_unpack（同一键出包：pack/oneclick/oneclick.sh 设 S2A_GAME_SRC / S2A_KEYS）：
         #   原始包 = 这款选中的原件软链进临时目录（stage_sources；不设就去扫 ~/Downloads：玩家机上弹「访问下载文件夹」授权框，10-26 侍魂晓日志实测扫了）；
         #   nx_unpack = 应用自带的读取工具（toolchain.reader，dotnet 跑 dll）包一层可执行壳——不给就按源码现编，启动器只带运行时、没有 SDK，编不出（10-26 侍魂晓停在 aoc）

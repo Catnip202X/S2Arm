@@ -15331,9 +15331,19 @@ static int link_on(void) { return g_dm_present_link && g_link != nil; }
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+// 高刷新档（模式 5）：游戏自己不锁帧（交换间隔 0）且上限高于 60 时，链接按上限跑。上限 ≤ 屏幕时是整倍数就按整速率，
+//   否则沿用虚拟拍（跑屏幕速率、只数 1/上限 秒一拍）。读数由 link_sync 每帧写 g_link_hi
+static _Atomic int g_link_hi = 120;
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
-    int rate = mode == 4 ? 20 : mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;
+    int hz = on ? front_screen_max_fps() : 0;
+    if (mode == 5) {
+        int rate = atomic_load(&g_link_hi); if (rate < 60) rate = 60;
+        if (hz > rate && hz % rate) { if (g_link_vperiod != 1.0 / rate) MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (high refresh tier)", hz, rate); g_link_vhalf = 0.5 / hz; g_link_vperiod = 1.0 / rate; return CAFrameRateRangeMake(rate, hz, hz); }
+        g_link_vperiod = 0;
+        return CAFrameRateRangeMake(rate, rate, rate);
+    }
+    int rate = mode == 4 ? 20 : mode == 3 ? 30 : mode == 2 ? 120 : 60;
     if (mode != 2 && hz > rate && hz % rate) {
         if (g_link_vperiod != 1.0 / rate) MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (the screen's rate is not a multiple of it)", hz, rate);
         g_link_vhalf = 0.5 / hz; g_link_vperiod = 1.0 / rate;
@@ -15342,7 +15352,7 @@ static CAFrameRateRange link_range(int mode) {
     g_link_vperiod = 0;
     return mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : CAFrameRateRangeMake(rate, rate, rate);
 }
-static int g_link_mode = 1;   // 1 / 2 same as g_dm_present_link, 3 = 30 Hz, 4 = 20 Hz
+static int g_link_mode = 1;   // 1 / 2 same as g_dm_present_link, 3 = 30 Hz, 4 = 20 Hz, 5 = high refresh (g_link_hi)
 static int g_link_pending;
 static uint64_t g_link_pending_since, g_link_pending_period;
 static link_backoff g_low;   // 降到低频档的退避（nvn_link_backoff.h）
@@ -15422,7 +15432,19 @@ static void link_sync(double period) {   // Called every frame by the game's pre
     // after a loading screen. Preserve the native-30 stability gate and pins.
     // The requested range is a hint; actual iOS callbacks still need measuring.
     int candidate = want;
-    if (want && fps_override() == 30) want = candidate = 3;
+    // 快于 60 帧的判定要留够余量：present_period 用整数纳秒（1e9/60 = 16666666），60 帧的帧期算出来是 60.0000024 Hz，
+    //   按 60 + 1e-6 判会让每一帧都在「高刷新档 / 60 档」之间来回切（11-08 P4G 真实局：模式 5→1 抖动、退避从 1 秒翻到 16 秒）。
+    //   取 5% 余量：≥ 63 帧才算真的更快，60 帧锁的款永远不进这一档
+    const double fast_hz = period > 0 ? 1.0 / period : 0;
+    if (want && fps_override() < 0 && nvn_fps_limit() > 60 && fast_hz > 60.0 * 1.05) {
+        // 高刷新档（5）：游戏自己不锁帧（交换间隔 0）且上限高于 60，周期才可能明显快于 60 帧。链接按上限跑，夹到屏幕速率；
+        //   上限 ≤ 60 或普通锁帧游戏周期永远在 16.7 ms 附近，走不到这里
+        int hi = (int)lround(fast_hz), scr = front_screen_max_fps();
+        if (hi > NVN_FPS_MAX_HZ) hi = NVN_FPS_MAX_HZ;
+        if (scr > 0 && hi > scr) hi = scr;
+        atomic_store(&g_link_hi, hi);
+        want = candidate = 5;
+    } else if (want && fps_override() == 30) want = candidate = 3;
     else if (want) {
         if (fps_override() < 0 && fabs(period * 20 - 1) < 1e-6) candidate = 4;
         else {
@@ -15430,7 +15452,8 @@ static void link_sync(double period) {   // Called every frame by the game's pre
             if (slots >= 1 - 1e-6 && fabs(slots - round(slots)) < 1e-6) candidate = 3;
         }
         // 20 Hz 档只看周期本身（恰好 50 ms、连续 1 秒，下面的迟滞判）：间隔 3 不再计入 30 帧口径（见 hle_nvn.c present_period）
-        if (nvn_be_fps_target() == 30 || nvn_fps_limit() == 30 || candidate == 4) want = candidate;
+        // 上限 ≤ 30 也算 30 帧口径（24–30 都走这条，不再只认恰好 30）
+        if (nvn_be_fps_target() == 30 || (nvn_fps_limit() > 0 && nvn_fps_limit() <= 30) || candidate == 4) want = candidate;
     }
     // Reuse the one-second rationale of g_itv2_since: a single slow frame must
     // not reconfigure the system's asynchronous display link. Both directions
@@ -15643,7 +15666,7 @@ int nvn_be_link_wait_tick(int vsyncs, uint64_t timeout_ns) {
     // Reuse the final-period cap; interval 0 with a 120 cap remains
     // one real 120 Hz tick, while positive intervals retain their 60 Hz base.
     double period = nvn_fps_period(vsyncs / 60.0);
-    int rate = g_link_mode == 4 ? 20 : g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60;
+    int rate = g_link_mode == 5 ? atomic_load(&g_link_hi) : g_link_mode == 4 ? 20 : g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60;
     const uint64_t step = (uint64_t)fmax(1, ceil(period * rate - 1e-6));
     pthread_mutex_lock(&g_link_mu);
     if (g_link_tick_n >= g_link_started_tick + step) { g_link_started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); return 1; }

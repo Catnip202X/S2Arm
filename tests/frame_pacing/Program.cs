@@ -42,11 +42,19 @@ static class Program
         Equal(30, FramePacingPolicy.ParseLimit("30"), "30 FPS setting");
         Equal(60, FramePacingPolicy.ParseLimit("60"), "60 FPS setting");
         Equal(120, FramePacingPolicy.ParseLimit("120"), "120 FPS setting");
-        Rejects("");
-        Rejects("29");
-        Rejects("240");
+        Equal(144, FramePacingPolicy.ParseLimit("144"), "144 FPS setting");
+        Equal(240, FramePacingPolicy.ParseLimit("240"), "240 FPS setting");
+        Equal(24, FramePacingPolicy.ParseLimit("24"), "lower bound 24");
+        Equal(1000, FramePacingPolicy.ParseLimit("1000"), "upper bound 1000");
+        Equal(0, FramePacingPolicy.ParseLimit("off"), "explicit off");
+        Equal(0, FramePacingPolicy.ParseLimit("display"), "display without a known screen rate is unlimited");
+        Equal(144, FramePacingPolicy.ParseLimit("display", 144), "display follows the screen rate");
+        Equal(0, FramePacingPolicy.ParseLimit(""), "empty S2A_FPS means unlimited, like the C side");
+        Rejects("23");
+        Rejects("1001");
         Rejects("-1");
         Rejects("60 ");
+        Rejects("displayed");
 
         int min30 = FramePacingPolicy.SwapIntervalFloor(30, 60);
         int min60 = FramePacingPolicy.SwapIntervalFloor(60, 60);

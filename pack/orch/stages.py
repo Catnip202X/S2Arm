@@ -573,12 +573,13 @@ class Stages:
         try:
             base, plan = self._caps_plan(current, deps)
             replay = ('s2a_caps.tsv', 's2a_caps.all.tsv', 'caps.log', '.stage_caps', '.stage_caps.deps')
+            if plan: replay += ('s2a_display.tsv',)
             key = base
             if read(current / f'.stage_{stage}') == deps.key(base):
                 return self._result(stage, start, current, key, skipped=True)
             tx = self.roots.begin(game, self.roots.tag(game, stage + '-' + digest(key, 8)), env=deps.env)
             try:
-                self._caps(tx.path, deps)
+                self._caps(tx.path, deps, plan)
                 deps.save(tx.path, base)
                 text(tx.path / f'.stage_{stage}', key + '\n')
                 result = self._result(stage, start, tx.path, key)
@@ -614,11 +615,23 @@ class Stages:
         # Like grep -i '^<PID>\t': keep exact matching row bytes and order.
         rows = ''.join(line + '\n' for line in read(REPO / 'docs/名单_验证账.tsv').splitlines()
                        if line.split('\t', 1)[0].upper() == pid.upper())
+        # 出包时选的显示默认值（S2A_DISPLAY_REFRESH / S2A_DISPLAY_OUT，与 bash 阶段同一份环境变量）：
+        #   值变了键就要变，否则同一款换分辨率会命中缓存、出旧包。空 = 不带这份文件（产物与原先逐字节相同）
+        refresh = deps.env.get('S2A_DISPLAY_REFRESH', '') or ''
+        out_size = deps.env.get('S2A_DISPLAY_OUT', '') or ''
+        if refresh and not (refresh in ('off', 'display') or (refresh.isdigit() and 24 <= int(refresh) <= 1000)):
+            raise StageError('刷新率选项无效（off / display / 24–1000）')
+        if out_size and out_size not in ('native', 'fit'):
+            parts = out_size.split('x')
+            if len(parts) != 2 or not all(p.isdigit() and 1 <= int(p) <= 16384 for p in parts):
+                raise StageError('分辨率选项无效（native / fit / WxH，单边 1–16384）')
+        plan = {'refresh': refresh, 'out': out_size} if (refresh or out_size) else None
         deps.record('pack/gen_caps.sh')
-        return digest(rows + 'rewrite=' + rewrite + '\n' + signal_hash), None
+        key_line = 'display=' + ('|'.join((refresh or 'none', out_size or 'none')) if plan else '-')
+        return digest(rows + 'rewrite=' + rewrite + '\n' + key_line + '\n' + signal_hash), plan
 
     @staticmethod
-    def _caps(output, deps):
+    def _caps(output, deps, plan=None):
         lines, _ = deps.python('tools/caps_policy.py', 'decide',
                                deps.env.get('S2A_CAPS_REPO') or REPO, output, '--both', '--target', 'apple',
                                log=output / 'caps.log')
@@ -640,6 +653,11 @@ class Stages:
             if display == '1':
                 content += 'fps60_display\t1\t# 引擎通用：放开出图间隔（全引擎，同局 A/B 判红才关）\n'
             text(output / filename, content)
+        if plan:   # 包内显示默认值（宿主 runtime/src/display_cfg.c 读；玩家设置与启动环境优先）
+            rows = ['plat\tmacos', '# 包内显示默认值（玩家设置与启动环境优先；runtime/src/display_cfg.c 读）']
+            if plan.get('refresh'): rows.append(f"refresh\t{plan['refresh']}\t# 出包时选的刷新率上限")
+            if plan.get('out'): rows.append(f"out_size\t{plan['out']}\t# 出包时选的输出分辨率")
+            text(output / 's2a_display.tsv', '\n'.join(rows) + '\n')
 
     def _light_current(self, game):
         current = self.roots.cur(game)
