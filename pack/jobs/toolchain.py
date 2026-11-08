@@ -494,6 +494,7 @@ DOTNET_PROGRESS_S = 10   # .NET 安装下载进度的上报间隔（秒）
 
 def install_dotnet(c):
     # 一键安装 .NET 10 SDK 到 ~/.dotnet：微软官方安装脚本（https://dot.net/v1/dotnet-install.sh），只当数据下载、用 bash 执行官方脚本，不要管理员密码
+    # 注意：这里只做「落盘再执行」，不对脚本本身做摘要/签名校验（上游没有稳定校验端点）；docs 里的手动命令与此保持同一形态，不要写成管道
     c.begin("下载 .NET 安装脚本", 1, 2)
     script = c.private / "cache" / "dotnet-install.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
