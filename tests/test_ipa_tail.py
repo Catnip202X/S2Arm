@@ -8,6 +8,8 @@
 ④ 实跑 Info.plist 写入（app_bundle.py update_metadata，同 ipa_tail 用的调用）：包号与着色器目标读回一致、未知布尔键保留；空着色器目标 → 删掉旧键
 ⑥ 开发设施开关（S2ADevFacilities）：S2A_PACK_PURPOSE=user → "0"（玩家包关）；没设 / 别的用途 → 空串（删键 = 开发设施开）
 ⑤ 签名方式：非 Mac 上 adhoc / dev → 退 1 报红；dev 没给团队 → 退 1
+⑦ 「打 ipa」失败要带出真正的原因（11-08 反馈：出包 2/5、错误码 package_failed「原因没认出来」）：archive_reason 红行优先、否则日志最后一行
+   （python traceback 的末行 = 异常本身），日志缺失给空串——调用方据此把原因写进红行与错误摘要
 """
 import hashlib, os, plistlib, subprocess, sys, tempfile, unittest
 from pathlib import Path
@@ -49,6 +51,19 @@ class Tail(unittest.TestCase):
         self.assertEqual(ipa_tail.pso_target(self.mk("e", {})), "")
         pk = "8cf4073a1 cur=/x/roots/botw@sh-1 vamm=alias sign=adhoc"
         self.assertEqual(ipa_tail.build_id(pk), "8cf4073a1-" + hashlib.sha256((pk + "\n").encode()).hexdigest()[:8])
+
+    def test_archive_reason_prefers_red_line_then_last_line(self):
+        red = self.t / "archive.log"
+        red.write_text("起步\n【红】App 组装：非 zip64 的 IPA 装不下这份 App：9 个条目、文件合计 123456 字节\n", encoding="utf-8")
+        self.assertEqual(ipa_tail.archive_reason(str(red)),
+                         "【红】App 组装：非 zip64 的 IPA 装不下这份 App：9 个条目、文件合计 123456 字节")
+        trace = self.t / "trace.log"
+        trace.write_text("Traceback (most recent call last):\n  File \"app_bundle.py\", line 1, in write_ipa\nOSError: [Errno 28] No space left on device\n",
+                         encoding="utf-8")
+        self.assertEqual(ipa_tail.archive_reason(str(trace)), "OSError: [Errno 28] No space left on device")
+        empty = self.t / "empty.log"
+        empty.write_text("", encoding="utf-8")
+        self.assertEqual((ipa_tail.archive_reason(str(empty)), ipa_tail.archive_reason(str(self.t / "missing.log"))), ("", ""))
 
     def test_plist_write(self):
         app = self.t / "S2Arm.app"; app.mkdir(); (app / "S2Arm").write_bytes(b"x")

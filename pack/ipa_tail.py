@@ -95,6 +95,14 @@ def last(log, red=False):
     return lines[-1] if lines else ''
 
 
+def archive_reason(log):
+    """「打 ipa」失败时要带出去的那一行：write_ipa 自己的红行优先，没有就取日志最后一行（python traceback 的最后一行 = 异常本身）。
+    11-08 反馈（9.78 GB 的 PERSONA4 The GOLDEN 停在出包 2/5、错误码 package_failed「原因没认出来」）：这一步原先不带日志、
+    失败只说一句「打 ipa 失败」，真正的原因（体积账 / errno / zipfile 异常）既没进红行也没进摘要，归因只能落到 package_failed。"""
+    red = last(log, True)
+    return red if '【红】' in red else last(log)
+
+
 def build_id(key):   # = pack/build_id.sh s2a_build_id：<提交号>-<整串包键（含末尾换行）的 sha256 前 8 位>
     return f"{key.split(' ', 1)[0]}-{hashlib.sha256((key + chr(10)).encode()).hexdigest()[:8]}"
 
@@ -127,6 +135,7 @@ def assemble(a):
     w, g = a.work, a.game
     pkg = os.path.join(w, 'pkg'); os.makedirs(pkg, exist_ok=True)
     tl, bl, sl = os.path.join(pkg, 'timing.tsv'), os.path.join(pkg, 'build.log'), os.path.join(pkg, 'sign.log')
+    al = os.path.join(pkg, 'archive.log')   # 打 ipa 自己的输出（原先直接落进调用方的 tail.out，失败时随临时产物根一起删掉）
     app = os.path.join(w, 'build', 'ios', 'S2Arm.app')
     if os.path.lexists(os.path.join(w, 'build')): shutil.rmtree(os.path.join(w, 'build'), onerror=_writable)   # 上次组装的临时 App（重跑 / 失败残留）
     icon = os.path.join(R, 'launchers/macos/Branding/AppIcon-1024.png')   # 宿主 App 永远用 S2Arm 自己的图标；游戏图标只给库里的入局入口（11-08 维护者）
@@ -162,7 +171,9 @@ def assemble(a):
         raise Red(last(sl, True) if '【红】' in last(sl, True) else f'签名核实失败：提高内存上限权限缺失或含私有 JIT 键，见 {sl}')
     ipa = os.path.join(pkg, f'{g}.ipa')
     if os.path.lexists(ipa): os.remove(ipa)   # 上次的 ipa（write_ipa 不覆盖已有目标）
-    if step(tl, '打ipa', [PY, os.path.join(H, 'app_bundle.py'), 'write_ipa', app, ipa]): raise Red('打 ipa 失败')
+    if step(tl, '打ipa', [PY, os.path.join(H, 'app_bundle.py'), 'write_ipa', app, ipa], al, 'w'):
+        reason = archive_reason(al).removeprefix('【红】').strip()   # 红标记去掉：外层 fail 会再加一个，摘要里不叠
+        raise Red(f'打 ipa 失败（{reason or "没有输出"}）')
     # 进包核对：ipa 里 gal_helpers/m3/ 的库文件名集合 = 壳的 m3/（Metal 3 兼容辅助库漏拷时预热静默现编）
     hl = os.path.join(a.shell, 'root', 'gal_helpers', 'm3')
     want = sorted((n for n in os.listdir(hl) if n.endswith('.metallib')), key=lambda s: s.encode()) if os.path.isdir(hl) else []
