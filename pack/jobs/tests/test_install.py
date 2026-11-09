@@ -686,10 +686,34 @@ class AssembleTests(unittest.TestCase):
         def run(*a, **k): pass
         with um.patch.object(packer, "current_shell_id", return_value="SID2"), \
              um.patch.object(packer, "container_shell", return_value=shell), \
-             um.patch.object(self.c, "run", run):
+             um.patch.object(self.c, "run", run), \
+             um.patch.object(self.c, "catalog", return_value={"games": [{"id": A}, {"id": B}]}):
             with self.assertRaises(Failure) as e: packer.assemble(self.c, A)
         self.assertEqual(e.exception.code, "container_stale")
         self.assertIn("B款", str(e.exception))
+
+    def test_assemble_shell_changed_skips_games_deleted_from_library(self):
+        """#194：旧容器里的某款已从游戏库删除：不点名、不挡出包，新容器不带它（不传 --base），黄字说明"""
+        A, B = "0100000000010000", "0100000000020000"
+        self._shell_and_root(A, "SID2")
+        import ipa as packer
+        shell = self.c.private / "shell"; shell.mkdir(exist_ok=True); (shell / "manifest.json").write_text("{}")
+        base = self.c.library / "iPhone/container/S2Arm.app"; base.mkdir(parents=True, exist_ok=True)
+        (base / "s2a_catalogue.json").write_text(json.dumps({"schema": 1, "shell_id": "SID1", "games": [{"title_id": B, "name": "B款"}, {"title_id": A}]}))
+        runs, notes = [], []
+        class Stop(Exception): pass
+        def run(cmd, *a, **k):
+            runs.append([str(x) for x in cmd]); raise Stop
+        with um.patch.object(packer, "current_shell_id", return_value="SID2"), \
+             um.patch.object(packer, "container_shell", return_value=shell), \
+             um.patch.object(self.c, "run", run), \
+             um.patch.object(self.c, "catalog", return_value={"games": [{"id": A}]}), \
+             um.patch.object(self.c, "diagnostic", lambda m, **k: notes.append((m, k.get("severity")))), \
+             self.assertRaises(Stop):
+            packer.assemble(self.c, A)
+        self.assertNotIn("--base", runs[0])
+        self.assertEqual(runs[0].count("--game"), 1)
+        self.assertEqual(len(notes), 1); self.assertIn("B款", notes[0][0]); self.assertEqual(notes[0][1], "warning")
 
     def test_assemble_own_game_no_root(self):
         """① 本款无本壳产物根 → container_stale"""
@@ -746,15 +770,26 @@ class AssembleTests(unittest.TestCase):
         self.assertIn("没有这款", str(e.exception))
 
     def test_remove_from_phone_last_game(self):
-        """③ 最后一款 → container_last_game"""
+        """③ 最后一款（#227）：不再硬拒；备份存档、删手机上它的数据，不装空容器；游戏库里的容器摘空"""
+        import ipa as packer
         A = "0100000000010000"
         out = self.c.library / "iPhone/container"; out.mkdir(parents=True, exist_ok=True)
         (out / "S2Arm.app").mkdir(parents=True, exist_ok=True)
         (out / "S2Arm.app/s2a_catalogue.json").write_text(json.dumps({"schema": 1, "games": [{"title_id": A}]}))
         (out / "S2Arm.ipa").write_bytes(b"x")
         self.c.r.update(gameId=A)
-        with self.assertRaises(Failure) as e: install.remove_from_phone(self.c)
-        self.assertEqual(e.exception.code, "container_last_game")
+        def run(args, *a, **k):
+            args = [str(x) for x in args]
+            if "container-drop" in args:
+                o = Path(args[args.index("--out") + 1]); o.mkdir(parents=True)
+                (o / "s2a_catalogue.json").write_text(json.dumps({"schema": 1, "games": []}))
+            if "write_ipa" in args: Path(args[-1]).write_bytes(b"empty")
+        ph = um.Mock(); ph.bid = "io.s2arm.games"; ph.info = {"device": "d"}; ph.backup.return_value = None; ph.purge.return_value = (True, "")
+        with um.patch.object(install, "phone_for", return_value=ph), um.patch.object(self.c, "run", run):
+            r = install.remove_from_phone(self.c)
+        ph.install.assert_not_called()
+        ph.backup.assert_called_once_with(A); ph.purge.assert_called_once_with(A)
+        self.assertEqual((r["games"], json.loads((out / "S2Arm.app/s2a_catalogue.json").read_text())["games"]), ([], []))
 
     def test_remove_from_phone_purge_failure_warning(self):
         """③ purge 失败只报 container_purge_failed 黄字，不报整单失败"""
@@ -826,10 +861,13 @@ class ShipExtContainerDropTests(unittest.TestCase):
         # A 的目录已删
         self.assertFalse((out / "Games" / A).exists())
 
-    def test_drop_last_game_refused(self):
+    def test_drop_last_game_leaves_empty_container(self):
+        """#227：摘最后一款不再拒，得到 0 款的容器（游戏库侧下次加款的底子），它的目录和镜像包都没了"""
         A = "0100000000010000"
         self._make_container([A])
-        with self.assertRaises(SystemExit): self._drop(A)
+        out = self._drop(A)
+        self.assertEqual(json.loads((out / "s2a_catalogue.json").read_text())["games"], [])
+        self.assertFalse((out / "Games" / A).exists()); self.assertFalse((out / f"Frameworks/S2AImages-{A}.dylib").exists())
 
 
 if __name__ == "__main__":

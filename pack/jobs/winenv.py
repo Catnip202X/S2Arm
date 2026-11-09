@@ -313,10 +313,11 @@ class NativeProbe:
         if kind == "service":
             return self.service()
         if kind == "metal":
-            exe = (options.get("executable") or os.environ.get("S2A_METAL_EXE") or shutil.which("metal.exe")
-                   or str(Path(os.environ.get("S2A_METAL_BIN") or r"C:\Program Files\Metal Developer Tools\bin") / "metal.exe"))   # 同 oneclick_win.metal_bin()：官方安装器缺省装这里、不进 PATH
+            exe = options.get("executable") or os.environ.get("S2A_METAL_EXE")
             if not exe:
-                raise FileNotFoundError()
+                sys.path.insert(0, str(ROOT))
+                from pack.orch.oneclick_win import metal_exe
+                exe = str(metal_exe())   # 与出包预检、实际编译共用目录选择，显式目录优先于 PATH
             meta = self("file", path=exe)
             if not meta["exists"]:
                 raise FileNotFoundError()
@@ -669,6 +670,9 @@ def _apple(probe):
     return [driver, usb]
 
 
+ICLOUD_STORE = ("AppleInc.iCloud", "CN=5BD5593D-A41B-4F89-884E-B4F3E0FBAA75", "AppleInc.iCloud_nzyj5cx40ttqa")
+
+
 def _icloud(probe):
     observed = probe("icloud")
     if (not isinstance(observed, dict) or not isinstance(observed.get("packages"), list)
@@ -677,14 +681,10 @@ def _icloud(probe):
     for package in observed["packages"]:
         if not isinstance(package, dict):
             raise ValueError()
-        name, publisher = package.get("Name", ""), package.get("Publisher", "")
-        family, version = package.get("PackageFamilyName", ""), package.get("Version", "")
-        if (isinstance(name, str) and name.endswith(".iCloud")
-                and isinstance(publisher, str)
-                and re.search(r"(?:^|,)\s*CN=Apple Inc\.(?:,|$)", publisher)
-                and re.search(r"(?:^|,)\s*O=Apple Inc\.(?:,|$)", publisher)
+        version = package.get("Version", "")
+        # 商店版的发布者是商店分配的编号，不是 Apple Inc.（#165）；包族名末段由发布者算出，三项一起认出官方这一份
+        if ((package.get("Name"), package.get("Publisher"), package.get("PackageFamilyName")) == ICLOUD_STORE
                 and package.get("SignatureKind") == "Store" and package.get("Status") == "Ok"
-                and isinstance(family, str) and family.startswith(name + "_") and len(family) > len(name) + 1
                 and isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", version)):
             return "ok", {"source": "local", "evidence": "current-user Store package", "version": version}
     # 官方传统安装版（support.apple.com 下载的 iCloud 安装器，非商店版）：卸载登记名称和发布者都对就算装了
