@@ -1,0 +1,129 @@
+using Ryujinx.Common;
+using Ryujinx.Graphics.Device;
+using Ryujinx.Graphics.Video;
+using Ryujinx.Memory;
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+namespace Ryujinx.Graphics.Nvdec
+{
+    // S2Arm (docs/设计_原生VP9/design_draft.md, Phase 1 · 1c/1d): debug-only evidence for the native VP9 design.
+    //   S2A_NVDEC_VP9_CAPTURE=<dir>          one frame_%06d.bin per VP9 job (layout below; tools/vp9_capture_check.py reads it)
+    //   S2A_NVDEC_VP9_PERTURB=counts|mvs     after the C# decoder, zero the counts buffer or the MV write buffer of every job
+    // On Android, S2A_* variables reach the process only in debuggable builds (DebugEnvironment.java). Unset = no cost beyond one null check.
+    //
+    // Record (little-endian): "S2V9", u32 version 1, u32 job, u32 sizes of [PictureInfo, EntropyProbs, registers, tile data, pre-bytes],
+    // then those sections. registers = u32 luma/chroma for Last, Golden, Alt, output, then ColMvRead, ColMvWrite, CtxCounter, SegmentRead,
+    // SegmentWrite, TileSize, InBufBase (all in 256-byte units as the guest wrote them). pre-bytes = guest memory just before the tile data,
+    // up to 64 KiB, stopping at the first unmapped page. Trailer: u8 decoded, u64 FNV-1a-64 of the visible Y, U, V rows of the C# output,
+    // of the MV write buffer (as this job leaves it) and of the counts buffer in guest memory.
+    static class S2AVp9Capture
+    {
+        private static readonly string _dir = Environment.GetEnvironmentVariable("S2A_NVDEC_VP9_CAPTURE");
+        public static readonly string Perturb = Environment.GetEnvironmentVariable("S2A_NVDEC_VP9_PERTURB");
+        private const int PreMax = 64 * 1024;
+        private static int _job;
+        private static bool _failed;
+
+        public static bool Enabled => !string.IsNullOrEmpty(_dir) && !_failed;
+
+        public static void Write(DeviceMemoryManager mm, ref NvdecRegisters state, ReadOnlySpan<byte> pictureInfo, ReadOnlySpan<byte> entropy,
+            ReadOnlySpan<byte> tiles, bool decoded, ISurface output, ReadOnlySpan<byte> mvs, int countBytes)
+        {
+            int job = _job++;
+
+            try
+            {
+                Span<uint> regs = stackalloc uint[15];
+                for (int i = 0; i < 4; i++)
+                {
+                    regs[i * 2] = state.SetPictureLumaOffset[i];
+                    regs[i * 2 + 1] = state.SetPictureChromaOffset[i];
+                }
+                regs[8] = state.Vp9SetColMvReadBufOffset;
+                regs[9] = state.Vp9SetColMvWriteBufOffset;
+                regs[10] = state.Vp9SetCtxCounterBufOffset;
+                regs[11] = state.Vp9SetSegmentReadBufOffset;
+                regs[12] = state.Vp9SetSegmentWriteBufOffset;
+                regs[13] = state.Vp9SetTileSizeBufOffset;
+                regs[14] = state.SetInBufBaseOffset;
+
+                byte[] pre = ReadBefore(mm, MemoryExtensions.ExtendOffset(state.SetInBufBaseOffset));
+
+                Directory.CreateDirectory(_dir);
+                using var w = new BinaryWriter(File.Create(Path.Combine(_dir, $"frame_{job:D6}.bin")));
+                w.Write("S2V9"u8);
+                w.Write(1u);
+                w.Write((uint)job);
+                w.Write((uint)pictureInfo.Length);
+                w.Write((uint)entropy.Length);
+                w.Write((uint)(regs.Length * 4));
+                w.Write((uint)tiles.Length);
+                w.Write((uint)pre.Length);
+                w.Write(pictureInfo);
+                w.Write(entropy);
+                w.Write(MemoryMarshal.AsBytes(regs));
+                w.Write(tiles);
+                w.Write(pre);
+                w.Write(decoded ? (byte)1 : (byte)0);
+                w.Write(decoded ? HashPlane(output.YPlane, output.Stride, output.Width, output.Height) : 0UL);
+                w.Write(decoded ? HashPlane(output.UPlane, output.UvStride, output.UvWidth, output.UvHeight) : 0UL);
+                w.Write(decoded ? HashPlane(output.VPlane, output.UvStride, output.UvWidth, output.UvHeight) : 0UL);
+                w.Write(S2ARecord.Hash(mvs));
+                w.Write(S2ARecord.Hash(mm.DeviceGetSpan(state.Vp9SetCtxCounterBufOffset, countBytes)));
+            }
+            catch (Exception e)
+            {
+                _failed = true;
+                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"【红】S2A_NVDEC_VP9_CAPTURE 写第 {job} 帧失败，后面不再抓：{e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        // Walks back page by page from the tile data; stops at the first unmapped page or after 64 KiB.
+        private static byte[] ReadBefore(DeviceMemoryManager mm, ulong va)
+        {
+            ulong start = va;
+            ulong limit = va >= PreMax ? va - PreMax : 0;
+
+            while (start > limit)
+            {
+                ulong page = (start - 1) & ~DeviceMemoryManager.PageMask;
+                if (!mm.IsMapped(page))
+                {
+                    break;
+                }
+                start = Math.Max(page, limit);
+            }
+
+            return start == va ? Array.Empty<byte>() : mm.GetSpan(start, (int)(va - start)).ToArray();
+        }
+
+        private static unsafe ulong HashPlane(Plane plane, int stride, int width, int height)
+        {
+            ulong h = 0xcbf29ce484222325UL;
+            byte* p = (byte*)plane.Pointer;
+
+            for (int y = 0; y < height; y++)
+            {
+                foreach (byte b in new ReadOnlySpan<byte>(p + (long)y * stride, width))
+                {
+                    h = (h ^ b) * 0x100000001b3UL;
+                }
+            }
+
+            return h;
+        }
+
+        public static void ZeroRegion(DeviceMemoryManager mm, uint offset, int size)
+        {
+            using WritableRegion region = mm.GetWritableRegion(MemoryExtensions.ExtendOffset(offset), size);
+            region.Memory.Span.Clear();
+        }
+
+        public static ReadOnlySpan<byte> Bytes<T>(ref T value) where T : unmanaged
+        {
+            return MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref value, 1));
+        }
+    }
+}

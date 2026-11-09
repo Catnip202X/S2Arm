@@ -59,7 +59,9 @@ namespace Ryujinx.Graphics.Nvdec
             uint lumaOffset = state.SetPictureLumaOffset[3];
             uint chromaOffset = state.SetPictureChromaOffset[3];
 
-            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+            bool decoded = _decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut);
+
+            if (decoded)
             {
                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
 
@@ -71,6 +73,25 @@ namespace Ryujinx.Graphics.Nvdec
             }
 
             WriteBackwardUpdates(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, ref info.BackwardUpdateCounts);
+
+            // S2Arm: debug-only evidence for the native VP9 design (S2AVp9Capture.cs)
+            if (S2AVp9Capture.Perturb != null)
+            {
+                if (S2AVp9Capture.Perturb == "mvs")
+                {
+                    mvsRegion.Memory.Span.Clear();
+                }
+                else if (S2AVp9Capture.Perturb == "counts")
+                {
+                    S2AVp9Capture.ZeroRegion(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, Unsafe.SizeOf<BackwardUpdates>());
+                }
+            }
+
+            if (S2AVp9Capture.Enabled)
+            {
+                S2AVp9Capture.Write(rm.MemoryManager, ref state, S2AVp9Capture.Bytes(ref pictureInfo), S2AVp9Capture.Bytes(ref entropy), bitstream,
+                    decoded, currentSurface, mvsRegion.Memory.Span, Unsafe.SizeOf<BackwardUpdates>());
+            }
 
             rm.Cache.Put(lastSurface);
             rm.Cache.Put(goldenSurface);
