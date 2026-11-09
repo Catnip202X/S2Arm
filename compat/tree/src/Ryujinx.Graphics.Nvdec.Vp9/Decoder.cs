@@ -91,6 +91,7 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
             cm.Lf.ModeRefDeltaEnabled = pictureInfo.ModeRefDeltaEnabled;
             cm.Lf.RefDeltas = pictureInfo.RefDeltas;
             cm.Lf.ModeDeltas = pictureInfo.ModeDeltas;
+            LoopFilter.LoopFilterInit(ref cm);
 
             Span<RefBuffer> frameRefsSpan = cm.FrameRefs.AsSpan();
             frameRefsSpan[0].Buf = (Surface)pictureInfo.LastReference;
