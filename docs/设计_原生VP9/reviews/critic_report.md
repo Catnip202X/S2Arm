@@ -1,0 +1,39 @@
+# Design-critic Goldfish (design + structural + style lenses): design_draft.md (rev 1)
+
+Reviewer: fresh subagent, personas `agents/design_critic.md`, `agents/structural.md`, `agents/style.md` (elephant-goldfish-model), no conversation context. Checked claims against the C# port (`compat/tree/src/Ryujinx.Graphics.Nvdec*`) and libvpx 1.15.0 source unpacked from the local build cache. No repository files modified.
+
+## Design lens
+
+- **D1. Critical: Option A's `error_resilient_mode` trick zeroes the reference sign bias.** `vp9_setup_past_independence` does `vp9_zero(cm->ref_frame_sign_bias)` (libvpx `vp9/common/vp9_entropymode.c:466`) after the header read it (`vp9_decodeframe.c:2747` read, `:2820` call; C# port `EntropyMode.cs:394`, `DecodeFrame.cs:1953/2044`). The C# oracle takes the guest's sign bias directly (`Nvdec.Vp9/Decoder.cs:47`). Effects: MV candidate sign inversion differs (`DecodeMv.cs:603`); compound prediction becomes impossible (`vp9_compound_reference_allowed`, `vp9_decodeframe.c:107`). The frames hit are those right after a hidden alt-ref (~10,674 in P4G), where libvpx encoders set the alt-ref sign bias to 1; errors spread through references. Stock libvpx has no other way to make `last_show_frame` 0, so Option A cannot decode P4G exactly. Fix: drop A, or restrict it to frames with all-zero sign bias and single reference mode; add a sign-bias histogram to the facts. Option B must always write `error_resilient_mode = 0` and drive `use_prev_frame_mvs` only through the hook.
+- **D2. High: no free slot after key frames.** Key frames refresh all 8 slots (`DecodeFrame.cs:1885`, same in libvpx), so the next inter frame's Last = Golden = Alt and "one free slot that holds none of the three" does not exist (1,957 times in P4G). Fix: key frame → all slots get the output offset; refresh any slot not named in `ref_frame_idx` (VP9 binds references before refresh).
+- **D3. High: the 33 ms gate ignores measured idle time and hidden frames.** 69% busy at 21 frames/s ≈ 33 ms busy + 15 ms idle per frame, so the C# decoder already passes a 33 ms gate. If the idle part is fixed serial guest work, decode + copy must fit ≈ 33.4 − 14.8 ≈ 18.6 ms per shown frame (a 1.8x cut, not 1.4x), and there are ~1.10 decodes per shown frame (116,534 / 105,860). Fix: define the unit, measure what the idle time is, set the gate = (frame interval − fixed overhead) / decodes per shown frame, bench under load.
+- **D4. High: mid-stream fallback to C# is not exact, even for B.** `SurfaceCache.Get` reuses exact-offset matches without re-reading guest memory (`Image/SurfaceCache.cs:43-58`); the C# decoder keeps `_lastSegmentMap` (`Nvdec.Vp9/Decoder.cs:14,178-215`) and is one static instance for all contexts (`Nvdec/Vp9Decoder.cs:17`). Fix: invalidate cache entries for native-written offsets; fallback only with segmentation off or reset, or import the seg map; add a native→C# switch replay test.
+- **D5. High: Option B uses libvpx's own previous-frame MVs, not the guest's MV read buffer** (`Nvdec/Vp9Decoder.cs:47-50`, `Decoder.cs:123` vs `vp9_decoder.c:478-480`). Fix: import the guest buffer (16-byte `Vp9MvRef` → `MV_REF`) when `UsePrevInFindMvRefs`; at least check "read buffer = previous write buffer" in step 1.
+- **D6. High: the guest supplies key-frame probability tables neither option can install.** The C# oracle reads the guest's `KfYModeProb`, `KfUvModeProb`, `KfPartitionProb` (`DecodeMv.cs:1077,1139`; `Types/Vp9Common.cs:369`; `Types/Vp9/EntropyProbs.cs:48+`); libvpx uses compile-time constants outside `FRAME_CONTEXT`. Segmentation tree/pred probabilities come from `EntropyProbs` too but belong in the uncompressed header. Fix: per-frame check that kf tables equal libvpx's constants, else route to C# with `【红】`; `Vp9EntropyProbs` is a superset of libvpx's fc, not a mechanical copy.
+- **D7. Medium: B's compressed header is not "tx mode only".** It also carries `reference_mode` when compound is allowed (all update flags "no update"); no `tx_mode` when lossless. B must pin `frame_parallel_decoding_mode = 0` (else no counts, `vp9_decodeframe.c:1979-1980,2377-2378`), `refresh_frame_context = 0`, `error_resilient_mode = 0`, and send every loop-filter delta (libvpx keeps deltas). Fix: field-by-field table (value and source) for the rebuilt headers.
+- **D8. Medium: Option 0 gaps.** (1) hidden frames: stock libvpx returns nothing from `vpx_codec_get_frame`; use `VP9_GET_REFERENCE` on the refreshed slot; (2) MV "accessor" means libvpx internals, contradicting "no patch", and "see below" has no target; (3) header search: backward candidates whose frame marker matches, header length + `header_size_in_bytes` ends at `SetInBufBaseOffset`, fields equal `PictureInfo`; (4) drift: cross-check libvpx's parsed header and slot map against `PictureInfo` and the guest's offsets every frame; guard the read against unmapped memory.
+- **D9. Medium: superframe index bytes unspecified.** Whether `BitstreamSize` includes a trailing index is unknown; libvpx parses a trailing index and otherwise treats leftover bytes as another frame (error). Add to step 1; define the exact byte range.
+- **D10. Medium: step 1 question 3 has no method.** Experiment: perturb the counts for frame N on a debug build and see whether frame N+1's `EntropyProbs` changes. Until then Goal 2 requires identical counts on every frame.
+- **D11. Medium: no security/robustness assessment** of guest-controlled bytes reaching libvpx C/NEON in-process. Add risks: libvpx CVE tracking for the 1.15.0 pin, fuzzing on mutated captures, size caps, patch owner.
+- **D12. Low:** "several times faster per core" and "unlikely to reach 1.0x" are unmeasured; mark as hypotheses.
+- **D13. Low:** B could support intra-only (hook allows `show_frame = 0`); justify the refusal or support it.
+
+**Verified correct:** UV-mode probabilities cannot be set by the compressed header; MV forward updates only produce odd values (`(literal7 << 1) | 1`); term-subexp deltas reach any coefficient/skip/mode value; libvpx's `use_prev_frame_mvs` condition (`vp9_decodeframe.c:2986-2989`) matches Ryujinx's `UsePrevInFindMvRefs` (`PictureInfo.cs:55-61`); libvpx row-MT collects and merges counts when not frame-parallel (`vp9_decodeframe.c:2377-2438`); Android builds `--disable-vp9`; all named paths exist.
+
+## Structural lens
+- **S1. Medium:** no Risks & Mitigations section (feature-spec standard). Add a table: risk / option / detection / mitigation.
+- **S2. Medium:** Phase 2 cannot pass the zero-decision rule; say this doc is a feature spec and the implementation plan follows `phase1_results.md`.
+- **S3. Low:** option labels inconsistent (0 beside A/B); data-flow legend disagrees with Option 0 text.
+- **S4. Low:** dangling "see below"; house rules unlinked.
+- **S5. Low:** Goal 1 (1.0x) vs readings (≥ 0.97x).
+- **S6. Low:** data-flow block has no language tag.
+
+## Style lens
+- **T1.** "small patch", "small accessor": name the functions and an estimated line count.
+- **T2.** "mirrors what the hardware does": unverified; say "mirrors the C# decoder's use of the same inputs".
+- **T3.** "with headroom", "within measurement noise": give numbers.
+- **T4.** "The hard part is not calling libvpx." is filler.
+- **T5.** "speed of the video equals the decoder's throughput" overstates; ~31% of the loop is not decode.
+
+## Verdict
+Not ready. Option A fails on P4G itself (sign-bias zeroing, D1). Option B is the only whole-frame route that can be exact for P4G but needs a field-exact header spec (D7), key-frame slot handling (D2), guest MV import (D5), a kf-table check (D6) and cache/segmentation handling before "safe fallback" holds (D4). Option 0 is plausible only if step 1 finds headers in guest memory, and needs hidden-frame, MV and drift mechanisms (D8). Fix the speed gate before using any measurement as go/no-go: the measured 69% busy implies ~18 ms, not 33 (D3).
