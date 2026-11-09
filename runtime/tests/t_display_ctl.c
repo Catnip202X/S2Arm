@@ -15,6 +15,8 @@ static int g_bad, g_n;
 static int g_mode = -9, g_hz = -9, g_set_n, g_fps60 = -9;
 int nvn_fps_set(int mode, int hz) { g_mode = mode; g_hz = hz; g_set_n++; return 0; }
 void s2a_fps_set_enabled(int on) { g_fps60 = on; }
+static int g_scr = 144;   // 替身：Mac 窗口壳报的屏幕最高刷新率（0 = iOS / 无窗口壳）
+int front_screen_max_fps(void) { return g_scr; }
 
 static void parse_case(const char *name, const char *text, int er, int eok, int ew, int eh, int e60, int ebad) {
     s2a_display_cmd c; int bad = 0; const char *why = NULL;
@@ -90,6 +92,13 @@ int main(void) {
     s2a_display_ctl_reset_for_test(); g_set_n = 0;
     s2a_display_ctl_tick();
     CHECK(g_set_n == 0, "坏行：refresh=12 不调用 nvn_fps_set，实得调用 %d 次", g_set_n);
+
+    // 报不出屏幕刷新率的宿主（iOS）：refresh 不执行，其余键照常（PR #38 复审阻塞 2）；负对照 = 去掉 display_ctl.c 的 scr 判断，这项应红
+    write_file(dir, "refresh=1000\nfps60=1\n");
+    s2a_display_ctl_reset_for_test(); g_set_n = 0; g_fps60 = -9; g_scr = 0;
+    s2a_display_ctl_tick();
+    CHECK(g_set_n == 0 && g_fps60 == 1, "无屏幕刷新率：refresh=1000 不调用 nvn_fps_set、fps60 照常，实得调用 %d 次 fps60=%d", g_set_n, g_fps60);
+    g_scr = 144;
 
     // 没有文件：什么都不做
     { char gone[1024]; snprintf(gone, sizeof gone, "%s/display.txt", dir); unlink(gone); }

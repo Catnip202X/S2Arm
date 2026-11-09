@@ -83,7 +83,7 @@ int s2a_display_parse(const char *text, s2a_display_cmd *c, int *bad_line, const
 // ---- 执行 ----
 static struct { unsigned long long ino; long long size; struct timespec mtime; int valid; } g_seen;
 static uint64_t g_next_ns;
-static int g_said_no_layer, g_said_no_set;
+static int g_said_no_layer, g_said_no_set, g_said_no_screen;
 static char g_applied[160];   // 上一轮实际生效的值（只在变化时打日志）
 
 static uint64_t mono_ns(void) {
@@ -106,6 +106,10 @@ static void note(const struct stat *st) {
 static void apply_refresh(int v) {
     int (*set)(int, int) = (int (*)(int, int))dlsym(RTLD_DEFAULT, "nvn_fps_set");
     if (!set) { if (!g_said_no_set) { g_said_no_set = 1; LOG("【黄】运行中改帧率上限：本宿主没链直连图形层，忽略 refresh"); } return; }
+    // 只在报得出屏幕最高刷新率的宿主（Mac 窗口壳 front_mac.m）改：iOS 走 Settings.bundle 的 0/30/60/120 + 重启生效，
+    //   这里没有屏幕上限可夹，refresh=1000 会原样进显示链接（PR #38 复审阻塞 2）
+    int (*scr)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "front_screen_max_fps");
+    if (!scr || scr() <= 0) { if (!g_said_no_screen) { g_said_no_screen = 1; LOG("【黄】运行中改帧率上限：本宿主报不出屏幕刷新率（只有 Mac 支持），忽略 refresh"); } return; }
     int mode = v < 0 ? 1 : v == 0 ? 0 : 2;   // 1 = display、0 = off、2 = Hz（nvn_fps.h NVN_FPS_*）
     if (set(mode, v > 0 ? v : 0)) LOG("【红】运行中改帧率上限 %d 被拒绝（越界），保留原值", v);
 }
@@ -121,7 +125,7 @@ static void apply_out(const s2a_display_cmd *c) {
     else if (!g_said_no_layer) { g_said_no_layer = 1; LOG("【黄】运行中改输出栅格：本宿主没有可重摆的窗口壳，下一次布局时生效"); }
 }
 // 单测钩子：清掉限频与「读过的文件」记忆，让下一拍真的去读
-void s2a_display_ctl_reset_for_test(void) { g_next_ns = 0; g_seen.valid = 0; g_applied[0] = 0; g_said_no_layer = g_said_no_set = 0; }
+void s2a_display_ctl_reset_for_test(void) { g_next_ns = 0; g_seen.valid = 0; g_applied[0] = 0; g_said_no_layer = g_said_no_set = g_said_no_screen = 0; }
 void s2a_display_ctl_tick(void) {
     uint64_t now = mono_ns();
     if (g_next_ns && now < g_next_ns) return;

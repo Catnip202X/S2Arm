@@ -3006,6 +3006,8 @@ static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should
 static uint8_t g_hold_ring[16];
 static double pres_expect_ms(uint64_t n) {   // the interval between presents n - 1 and n shows frame n - 1: the display link holds it for its own present's hold, the Mac pacer spaces present n by n's, so the larger of the two
     int k = g_hold_ring[n % 16] > g_hold_ring[(n - 1) % 16] ? g_hold_ring[n % 16] : g_hold_ring[(n - 1) % 16];
+    // 0 拍 = 未锁帧按上限出图（present_itv）：该停留 1/上限，不按 60 Hz 一拍（否则 144 帧下慢一倍的帧也不算慢帧）
+    if (!k && nvn_fps_limit() > 60) return 1000.0 / nvn_fps_limit();
     double held = (k ? k : 1) * 1000.0 / 60, tgt = 1000.0 * nvn_fps_period(1.0 / nvn_be_fps_target());   // 游戏原生 30 或用户上限 30 都不是慢帧
     return held > tgt ? held : tgt;
 }
@@ -3314,11 +3316,14 @@ __attribute__((weak)) int s2a_fps_present_hook(void) { return 0; }
 __attribute__((weak)) int s2a_fps60_display_source(void) { return 0; }   // runtime/src/caps.c；没链能力清单的宿主 / 图形单测没有清单来源
 __attribute__((weak)) void s2a_qp_frame(uint32_t draws, int video, int cutscene, int game_itv) { (void)draws; (void)video; (void)cutscene; (void)game_itv; }   // runtime/src/qprompt_host.c；图形单测没有宿主
 static _Atomic int g_fps_game_itv;   // 这一帧按游戏自己设的间隔（不走 display 模式）
+// 高刷新路径只在 Mac 开（PR #38 复审阻塞 2）：只有 front_mac.m 给出屏幕最高刷新率；iOS / 单测走 nvn_mtl.m 的弱定义返回 0，
+//   交换间隔 0 仍按 1 拍出图，上限 120 的 iOS 局与 upstream/main 一致（不把 60 帧逻辑的游戏跑到 120）
+static int hi_refresh_host(void) { return front_screen_max_fps() > 0; }
 static int present_itv(const win_t *o) {   // vsyncs per frame that presentation follows
     int c = fps_step_cap(), k = atomic_load(&g_fs_k);
     if (c) { atomic_store(&g_fps_unlocked, 0); return k && fstep_on() ? k : 60 / c; }
     // 游戏自己不锁帧（交换间隔 0）且上限高于 60：按 0 拍出图，周期由 present_period 取 1/上限（上限 ≤ 60 或锁帧游戏维持原样 = 1 拍）
-    int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : o->interval > 0 ? o->interval : (nvn_fps_limit() > 60 ? 0 : 1);
+    int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : o->interval > 0 ? o->interval : (nvn_fps_limit() > 60 && hi_refresh_host() ? 0 : 1);
     int fin = itv < 2 && g_hz > 0 && video_cap() ? 2 : itv;   // 放 ≤ 30 帧视频：至少隔 2 拍（60 Hz 节拍下 30 帧）
     atomic_store(&g_fps_unlocked, fin == 0);
     return fin;

@@ -2,6 +2,7 @@
 // 降档要求「同一周期稳 hold 秒」：进低频档后不到 2 秒就因周期表示不了被打回基础档，说明游戏在来回切，hold 翻倍（1→2→4… 封顶 64 秒）；
 //   在低频档稳住 60 秒恢复 1 秒。11-04 金刚 Mac 按游戏间隔出帧：间隔 3 稳 1 秒降 20 Hz、一帧间隔 2 立即回 60 Hz，260 秒换档 96 次。
 #pragma once
+#include <math.h>
 #include <stdint.h>
 
 enum { LB_HOLD0 = 1, LB_HOLD_MAX = 64, LB_FLAP_S = 2, LB_RESET_S = 60 };   // 秒
@@ -17,4 +18,13 @@ static inline void lb_forced_back(link_backoff *b, uint64_t now) {
     if (b->since && now - b->since < LB_FLAP_S * LB_S) b->hold = h * 2 > LB_HOLD_MAX * LB_S ? LB_HOLD_MAX * LB_S : h * 2;
 }
 // 链路档实际改变时调用：进入低频档记时刻，离开清零
-static inline void lb_applied(link_backoff *b, int from, int to, uint64_t now) { if (to >= 3 && from < 3) b->since = now; else if (to < 3) b->since = 0; }
+// 低频档只有 3（30 Hz）和 4（20 Hz）；5 是高刷新档（PR #38 复审：`>= 3` 会把它串进低频语义——退避、降档稳定时长、表示不了就打回）
+static inline int lb_low(int mode) { return mode == 3 || mode == 4; }
+static inline void lb_applied(link_backoff *b, int from, int to, uint64_t now) { if (lb_low(to) && !lb_low(from)) b->since = now; else if (!lb_low(to)) b->since = 0; }
+// 该链路档能否用整数个刻度给出这个周期（周期 0 = 不限，任何档都算能）。只对低频档有意义：
+//   高刷新档（5）按上限跑、夹到屏幕，游戏比刻度慢只是少拿刻度，从不「表示不了」（原先按 30 Hz 算，1/144 得 t = 0.208 → 一进就被打回）
+static inline int lb_exact(int mode, double period) {
+    if (period <= 0 || !lb_low(mode)) return 1;
+    double t = period * (mode == 4 ? 20 : 30);
+    return t >= 1 - 1e-6 && fabs(t - round(t)) < 1e-6;
+}

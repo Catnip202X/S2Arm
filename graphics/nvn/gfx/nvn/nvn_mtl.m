@@ -15419,11 +15419,7 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
     return NULL;
 }
-static int link_exact(int mode, double period) {   // 该链路档能否用整数个刻度给出这个周期（周期 0 = 不限，任何档都算能）
-    if (period <= 0 || mode < 3) return 1;
-    double t = period * (mode == 4 ? 20 : 30);
-    return t >= 1 - 1e-6 && fabs(t - round(t)) < 1e-6;
-}
+static int link_exact(int mode, double period) { return lb_exact(mode, period); }   // nvn_link_backoff.h（单测 t_link_backoff.c ⑦）
 static void link_sync(double period) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     if (atomic_load(&g_link_stop)) return;
     int applied = g_link_applied; int want = g_dm_present_link; const int base = want;
@@ -15463,7 +15459,7 @@ static void link_sync(double period) {   // Called every frame by the game's pre
     // 当前低频档（30 / 20 Hz）表示不了这一帧的周期（30 Hz 上的 50 ms、20 Hz 上的 33.3 ms）：立即回基础档（60 / 120 Hz），不等 1 秒、
     //   也不直接跳到另一个低频档（2↔3 来回切时会逐帧在 20 / 30 Hz 间改链路）；往低频降仍只走下面「同一周期稳 1 秒」
     //   （11-04 金刚真机：间隔 2↔3 来回切、周期从不稳 1 秒，链路一直留在 30 Hz，间隔 3 的帧全成 67 / 100 ms）
-    const int inexact = applied >= 3 && want && base && !fallback && fps_override() < 0 && !link_exact(applied, period);
+    const int inexact = lb_low(applied) && want && base && !fallback && fps_override() < 0 && !link_exact(applied, period);
     uint64_t now = now_ns(), period_ns = (uint64_t)llround(period * 1e9);
     // 退避（nvn_link_backoff.h）：进低频档不到 2 秒就被打回 = 来回切，下次降档要稳的时长翻倍；低频稳 60 秒恢复
     lb_tick(&g_low, now);
@@ -15474,7 +15470,7 @@ static void link_sync(double period) {   // Called every frame by the game's pre
         g_link_pending = candidate; g_link_pending_period = period_ns; g_link_pending_since = now;
     }
     if (applied && want != applied && want && fps_override() < 0 && !fallback && !inexact) {
-        if (now - g_link_pending_since < (want >= 3 ? lb_hold(&g_low) : LB_S)) want = applied;
+        if (now - g_link_pending_since < (lb_low(want) ? lb_hold(&g_low) : LB_S)) want = applied;
     }
     if (want == applied && (!want || g_link_started)) return;
     g_link_mode = want;
