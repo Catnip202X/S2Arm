@@ -11,7 +11,7 @@ command -v dotnet >/dev/null || { echo 'missing .NET SDK' >&2; exit 75; }
 D="$H/compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs"
 a=$(grep -n 'cm.Lf.ModeDeltas = pictureInfo.ModeDeltas;' "$D" | cut -d: -f1 || true); b=$(grep -n 'LoopFilter.LoopFilterInit(ref cm);' "$D" | cut -d: -f1 || true)
 c=$(grep -n 'LoopFilter.LoopFilterFrameInit(ref cm' "$D" | head -1 | cut -d: -f1 || true)
-[ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] || { echo "vp9_loop_filter_init: Decoder.Decode 没在 LoopFilterFrameInit 之前调 LoopFilterInit（$a/$b/$c）" >&2; exit 1; }
+[ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] || { echo "vp9_loop_filter_init: Decoder.Decode 没在 LoopFilterFrameInit 之前调 LoopFilterInit（${a}/${b}/${c}）" >&2; exit 1; }
 cd "$H/compat/tree"
 dotnet build "$P" -c Release -m:1 -p:UseSharedCompilation=false --nologo -v q
 exec dotnet "$H/tests/vp9_loop_filter_init/bin/Release/net10.0/Vp9LoopFilterInit.dll"
