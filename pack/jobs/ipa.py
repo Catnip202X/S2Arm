@@ -289,8 +289,11 @@ def _build(c):
     if missing:
         c.diagnostic("追加内容 %d 份没解出，包里不含（%s）" % (len(missing), "、".join(missing[:5]) + (" 等" if len(missing) > 5 else "")), code="aoc_missing", severity="warning")
     # Q15：成功清一次性中间产物，编库缓存跨次保留并按预算裁剪；失败留现场。
-    from library import prune_build
+    from library import prune_build, save_container_kit
     c.begin("清理出包中间产物")
+    root = product_root(c, gid)
+    if root is not None:
+        save_container_kit(c, gid, root)
     prune_build(c, gid)
     cache_result = trim(c.work_root, current_gid=gid, **compiler_policy)
     if not cache_result['accountingComplete'] or cache_result['evictionErrors'] or cache_result['diskErrors'] or cache_result['pressureRemaining']:
@@ -336,11 +339,22 @@ def container_shell(c, sid):
     return d
 
 
-def current_root(c, gid, sid):
-    """这款按本壳出的现行产物根；没出过 / 不是本壳出的 → None"""
+def product_root(c, gid):
+    """这款的现行产物根（打包流程的工作目录）；不存在 → None"""
     from build import oneclick_kuan
     out = c.library / "iPhone" / gid
     r = out / "work/pkg/product" if os.name == "nt" else out / "roots" / (oneclick_kuan(c, gid) + "@现行")   # Windows：win_oneclick 的工作根（现行各项联接 + 直连库，oneclick_win.product）
+    return r.resolve() if (r / "main.npdm").is_file() else None
+
+
+def current_root(c, gid, sid):
+    """这款按本壳出的、用来组装容器的目录：优先容器件（出包成功后留的），老玩家没有容器件时用现行产物根；没出过 / 不是本壳出的 → None"""
+    from library import CONTAINER_KIT
+    out = c.library / "iPhone" / gid
+    kit = out / CONTAINER_KIT
+    r = kit if (kit / "main.npdm").is_file() else product_root(c, gid)
+    if r is None:
+        return None
     try:
         ok = (r / "main.npdm").is_file() and (out / SHELL_STAMP).read_text(encoding="utf-8").strip() == sid
     except OSError:
@@ -380,14 +394,22 @@ def assemble(c, gid, root=None, dest=None):
     if base.is_dir():
         cat = json.loads((base / "s2a_catalogue.json").read_text(encoding="utf-8"))
         if cat.get("shell_id") != sid:
-            stale = []
+            stale, deleted = [], []
+            in_library = {g["id"].upper() for g in c.catalog()["games"]}
             for e in cat.get("games", []):
-                if e["title_id"] != gid:
-                    roots[e["title_id"]] = current_root(c, e["title_id"], sid)
-                    if roots[e["title_id"]] is None:
-                        stale.append(e.get("name") or e["title_id"])
+                if e["title_id"] == gid:
+                    continue
+                if e["title_id"].upper() not in in_library:   # 玩家已从游戏库删掉：重出不了，也不该挡住别的游戏，新容器里不再带它
+                    deleted.append(e.get("name") or e["title_id"])
+                    continue
+                roots[e["title_id"]] = current_root(c, e["title_id"], sid)
+                if roots[e["title_id"]] is None:
+                    stale.append(e.get("name") or e["title_id"])
             if stale:
                 raise Failure("S2Arm 更新过，手机上的「" + "」「".join(stale) + "」还是旧版出的：同一个 App 里的游戏要同一版，先给它们各「打 iPhone 包」一次，再装这款（手机上现有的不受影响）。", code="container_stale")
+            if deleted:
+                c.diagnostic("「" + "」「".join(deleted) + "」已从游戏库删除，新版 S2Arm 里不再包含它们；手机上的存档还在。", code="job_failed", severity="warning")
+            base = None   # 换壳时留下的各款都在 roots 里按本壳重组，已有容器里的不再带（已删的款也就留在外面）
     shell = container_shell(c, sid)
     out = Path(dest) if dest else lib
     out.mkdir(parents=True, exist_ok=True)
@@ -401,7 +423,7 @@ def assemble(c, gid, root=None, dest=None):
         (tmp / "custom.json").write_text(json.dumps(container_custom(c), ensure_ascii=False), encoding="utf-8")
         try:
             c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", tmp / "S2Arm.app", "--bundle-id", CONTAINER_BUNDLE,
-                   "--icon", icon, "--sign", "none" if os.name == "nt" else "adhoc", "--custom", tmp / "custom.json", *[x for r in roots.values() for x in ("--game", r)], *(["--base", base] if base.is_dir() else [])], log, c.env())
+                   "--icon", icon, "--sign", "none" if os.name == "nt" else "adhoc", "--custom", tmp / "custom.json", *[x for r in roots.values() for x in ("--game", r)], *(["--base", base] if base and base.is_dir() else [])], log, c.env())
         except Failure as e:
             text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
             if e.code == "tool_exit" and "地址空间类型不一致" in text:
