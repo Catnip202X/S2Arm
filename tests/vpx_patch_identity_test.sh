@@ -19,8 +19,8 @@ for f in "$H"/tests/data/vp9_synth/*.ivf "$H/services/S2A.Services.Tests/data/vp
     for t in 1 3; do
         "$W/hashdec-ship" "$f" "$t" > "$W/a"; "$W/hashdec-plain" "$f" "$t" > "$W/b"
         n=$(wc -l < "$W/a" | tr -d ' '); frames=$((frames + n))
-        if [ "$n" -gt 0 ] && cmp -s "$W/a" "$W/b"; then echo "通 ${f##*/} 线程 $t：$n 帧一致"
-        else echo "🔴 ${f##*/} 线程 $t：打补丁与不打补丁的输出不同（或没出帧）"; fails=$((fails + 1)); fi
+        if [ "$n" -gt 0 ] && cmp -s "$W/a" "$W/b"; then echo "通 ${f##*/} 线程 ${t}：$n 帧一致"
+        else echo "🔴 ${f##*/} 线程 ${t}：打补丁与不打补丁的输出不同（或没出帧）"; fails=$((fails + 1)); fi
     done
 done
 [ "$fails" = 0 ] && echo "vpx_patch_identity 单测全过（$frames 帧）" || { echo "vpx_patch_identity：$fails 组不一致"; exit 1; }
