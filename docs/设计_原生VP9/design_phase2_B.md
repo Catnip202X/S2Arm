@@ -20,6 +20,11 @@
   initialised, so deblocking almost never ran. Against libvpx it matched 3 of 838 frames before the fix and 838
   of 838 after. Goal 2 ("byte-identical to the C# decoder") therefore uses the C# decoder **with #226**, which
   must merge before the PR 3 parity gate.
+- **PR 3 + 4:** #247 (stacked on #213, #231, #226). Android uses native VP9 by default. P4G opening on the ROG Phone 6D:
+  1.01 / 1.00 / 1.00x playback speed (3 cold starts; was 0.53x on main and 0.70x with #86), 30 new frames per second,
+  33 ms median between frames. On the 1033 captured jobs the native path and the managed decoder (with #226) give
+  byte-identical pictures, MVs and counts.
+- Not done yet: the job generator (PR 2, all 116,534 frames offline) and a device check on an adapting stream (GRID).
 - Phase 1's libvpx numbers below were taken with 1.15.0. The 1.17.0 decoder gives byte-identical output on the
   same streams (#213).
 
