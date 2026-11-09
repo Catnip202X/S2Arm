@@ -677,10 +677,10 @@ class JobsTests(unittest.TestCase):
 
 
     def test_pack_space_needs_unpack_plus_direct(self):
-        # 预检门槛 = 原包 × 1.1 + 直连上限：恰好够放行，差 1 字节拦下，提示里写需要与剩余
+        # 预检门槛 = 原包 × 1.1 × 2（解包 + 单文件镜像）+ 直连上限：恰好够放行，差 1 字节拦下，提示里写需要与剩余
         import unittest.mock as um, collections
         base = dict(self.package("base"), size=6 << 30)
-        game = self.game(packages=[base]); need = (6 << 30) * 11 // 10 + 15_000_000_000
+        game = self.game(packages=[base]); need = 2 * ((6 << 30) * 11 // 10) + 15_000_000_000
         du = collections.namedtuple("du", "total used free")
         with um.patch("shutil.disk_usage", return_value=du(0, 0, need)):
             library.check_pack_space(self.c, game)
@@ -726,7 +726,7 @@ class JobsTests(unittest.TestCase):
                 game = self.game(tid=tid, packages=[dict(self.package("base", tid=tid), size=6 << 30)])
                 with um.patch("shutil.disk_usage", return_value=du(0, 0, 50 << 30)):
                     lib = library.space_budget(self.c, game)["volumes"][0]
-                self.assertEqual(lib["needBytes"], (6 << 30) * 11 // 10 + 15_000_000_000)
+                self.assertEqual(lib["needBytes"], 2 * ((6 << 30) * 11 // 10) + 15_000_000_000)
                 self.assertIn("直连着色器上限", lib["note"])
 
     def test_space_budget_uses_unpacked_bytes_for_compressed_packages(self):
@@ -741,7 +741,7 @@ class JobsTests(unittest.TestCase):
                 with um.patch("shutil.disk_usage", return_value=du(0, 0, 50 << 30)):
                     budget = library.space_budget(self.c, game)
                 self.assertEqual(budget["gameBytes"], want)
-                self.assertEqual(budget["volumes"][0]["needBytes"], want * 11 // 10 + 15_000_000_000)
+                self.assertEqual(budget["volumes"][0]["needBytes"], 2 * (want * 11 // 10) + 15_000_000_000)
 
     def test_space_budget_library_volume_only(self):
         # 11-02 起打 iPhone 包不再把原件暂存到数据目录（共用 游戏库/cache/<程序号>/extract），预算只有游戏库一卷：原件跨卷与否都一样
@@ -769,7 +769,7 @@ class JobsTests(unittest.TestCase):
                     library.check_pack_space(self.c, game)
                 lib = budget["volumes"][0]
                 self.assertEqual((lib["role"], lib["basis"], lib["needBytes"], lib["freeBytes"], lib["enough"], lib["volume"]),
-                                 ("library", "rule", (6 << 30) * 11 // 10 + 15_000_000_000, 50 << 30, True, "系统盘"))
+                                 ("library", "rule", 2 * ((6 << 30) * 11 // 10) + 15_000_000_000, 50 << 30, True, "系统盘"))
                 self.assertIn("直连着色器上限", lib["note"]); self.assertEqual(lib["unknown"], ["shader_cache"])
                 self.assertEqual(budget["gameBytes"], 6 << 30)
                 self.assertEqual([u["id"] for u in budget["unknown"]], ["shader_cache"])
@@ -789,7 +789,7 @@ class JobsTests(unittest.TestCase):
         self.assertIn("磁盘空间不够", str(e.exception))
         event = self.space_events()[-1]
         self.assertFalse(event["space"]["volumes"][0]["enough"])
-        self.assertEqual(event["space"]["volumes"][0]["needBytes"], (1 << 30) * 11 // 10 + 5_000_000_000)
+        self.assertEqual(event["space"]["volumes"][0]["needBytes"], 2 * ((1 << 30) * 11 // 10) + 5_000_000_000)
         self.c.begin("下一阶段", 2, 3); self.c.emit(done=1, total=2)
         job = json.loads(self.c.jobpath.read_text())
         self.assertEqual(job["space"], event["space"]); self.assertEqual(job["message"], "下一阶段")
@@ -1239,6 +1239,29 @@ class JobsTests(unittest.TestCase):
         self.assertTrue((self.c.library / package["path"]).exists())
         self.assertTrue(all(f.exists() for f in other))
 
+    def test_delete_also_drops_game_from_library_container(self):
+        # 期望（#227）：游戏库容器里有 A、B，删 A → 容器清单只剩 B、A 的随行目录和镜像包没了、B 原样；容器里没有的款删除不动容器。真跑 ship_ext container-drop
+        a, b = "0100000000010000", "0100000000020000"
+        app = self.c.library / "iPhone/container/S2Arm.app"
+        for gid in (a, b):
+            (app / "Games" / gid).mkdir(parents=True); (app / "Games" / gid / "main.npdm").write_bytes(b"META" + gid.encode())
+            (app / "Frameworks").mkdir(exist_ok=True); (app / "Frameworks" / f"S2AImages-{gid}.dylib").write_bytes(gid.encode())
+        (app / "s2a_catalogue.json").write_text(json.dumps({"schema": 1, "shell_id": "S", "games": [{"title_id": a}, {"title_id": b}]}))
+        import plistlib; (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "io.s2arm.games", "CFBundleExecutable": "S2Arm"})); (app / "S2Arm").write_bytes(b"bin")
+        (self.c.library / "iPhone/container/S2Arm.ipa").write_bytes(b"old")
+        self.catalogue([self.game(tid=a, packages=[self.package(tid=a)]), self.game(tid=b, packages=[self.package(tid=b, sha="b" * 64)])])
+        self.c.r["gameId"] = a
+        library.delete(self.c)
+        self.assertEqual([e["title_id"] for e in json.loads((app / "s2a_catalogue.json").read_text())["games"]], [b])
+        self.assertEqual(sorted(p.name for p in (app / "Games").iterdir()), [b])
+        self.assertEqual(sorted(p.name for p in (app / "Frameworks").iterdir()), [f"S2AImages-{b}.dylib"])
+        self.assertNotEqual((self.c.library / "iPhone/container/S2Arm.ipa").read_bytes(), b"old")
+        before = (app / "s2a_catalogue.json").read_text()
+        self.c.r["gameId"] = b
+        library.delete(self.c)   # 最后一款也摘（摘空）
+        self.assertEqual(json.loads((app / "s2a_catalogue.json").read_text())["games"], [])
+        self.assertNotEqual(before, (app / "s2a_catalogue.json").read_text())
+
     def test_delete_waits_for_execution_lock_held_by_cancelled_task(self):
         # 期望：执行锁被（刚被取消、还没退出的）任务占着 3 秒 → 删除不立刻失败，等锁放开后照样删掉（10-26 Spare-host：导入后自动排的 Mac 准备占锁，删除直接报「另一个任务正在使用游戏库」）
         import subprocess, sys, time
@@ -1595,6 +1618,15 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(save.read_bytes(), b"save")
         self.assertEqual((c.private / "logs" / (c.task + "-stages") / "stage.log").read_text(), "阶段日志")
 
+    def test_clean_after_stop_keeps_failed_stage_logs(self):   # #251：改写失败的 .failed/<款>_main.log 在游戏库缓存里，清理前要拷进私有日志目录，诊断包才带得上
+        gid, out, _ = self.stopped_game()
+        failed = self.c.library / "cache" / gid / "x" / "roots" / ".failed"; failed.mkdir(parents=True)
+        (failed / f"{gid}_main.log").write_text("改写超时前最后一行")
+        c = self.stop_context(gid)
+        library.clean_after_stop(c)
+        self.assertFalse(failed.exists())
+        self.assertEqual((c.private / "logs" / (c.task + "-stages") / f"{gid}_main.log").read_text(), "改写超时前最后一行")
+
     def test_clean_after_stop_removes_first_failed_export(self):
         gid, out, _ = self.stopped_game(kit=False, ipa=False)
         library.clean_after_stop(self.stop_context(gid))
@@ -1615,6 +1647,16 @@ class JobsTests(unittest.TestCase):
         self.assertFalse((out / "roots").exists())
         release = self.c.library / "games" / gid / "releases"
         self.assertEqual([p.name for p in release.iterdir()], ["good"])
+
+    def test_sweep_without_residue_never_takes_execution_lock(self):
+        """读游戏库（catalog）每次都扫：没有残留时不碰执行锁，否则同时开始的任务当场撞锁（11-09 main 守望红 SaveManagementTests）"""
+        import unittest.mock as um
+        gid, out, _ = self.stopped_game()
+        c = self.stop_context(gid)
+        library.sweep_residue(c)            # 先把残留清干净
+        with um.patch.object(library, "_execution_idle", side_effect=AssertionError("没有残留却去拿执行锁")):
+            library.sweep_residue(c)
+        self.assertEqual(sorted(p.name for p in (self.c.library / "games" / gid / "releases").iterdir()), ["good"])
 
     def test_diagnostic_bounded_reads_and_atomic_publication(self):
         import unittest.mock as um

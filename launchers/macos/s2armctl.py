@@ -43,6 +43,7 @@ USAGE = """s2armctl —— 让 AI 助手操作 S2Arm（每条命令 = 玩家点�
   target probe | target <机型号> <系统大版本>   重新检测连着的设备 / 没连时选机型
   update [restart|retry]            新版后台下载的状态；restart = 重启并换上已下载好的新版，retry = 重试下载（出包中不能重启）
   library <目录> [--move]            换游戏库位置（外接盘也行）；--move 把现有游戏、成品、缓存和存档一起搬到这个空文件夹
+  display <游戏号> [--fps60 on|off] [--widen on|off] [--metalfx on|off]   看 / 改这款的画面设置，下次启动生效
   errors [游戏号]                    最近失败任务的错误码、原因、建议、日志位置和日志末尾
   retry <任务号> | cancel <任务号>    重试 / 取消任务
   launch <游戏号>                    在 Mac 上启动游戏
@@ -53,6 +54,7 @@ USAGE = """s2armctl —— 让 AI 助手操作 S2Arm（每条命令 = 玩家点�
   next [游戏号] [--json]             AI 代操作入口：现在走到哪一步、下一步做什么（命令）、由谁做（ai 自己做 / ask 问玩家要输入 /
                                     human 只能玩家本人做 / confirm 先征得玩家同意）、为什么；出错时带错误码、原因和处理办法
   logs <任务号|游戏号> [--lines N]    读这条任务（或这款游戏最近一条任务）的日志末尾（缺省 40 行）
+  install <游戏号> [--team 团队号] [--device UDID或设备名]   装到 iPhone（签名 + 装 App + 推资源包）；连着多台时用 --device 指定（同网配对的也行）
   device <游戏号>                    iPhone 连没连、这款游戏的 App 装没装（装机要玩家用 AltStore 登录 Apple ID，AI 不代做）
   push-pack <游戏号>                 App 装好后把资源包拷进 iPhone（同在访达里把「资源包」文件夹拖到 App 上），拷完逐文件核对
 
@@ -205,8 +207,10 @@ DEFAULT_NEXT = ('ai', 's2armctl logs <任务号> 看原因，按日志末尾的�
 
 def task_log(task_id):
     d = os.path.join(ROOT, 'logs')
-    try: fs = [os.path.join(d, f) for f in os.listdir(d) if f.startswith(task_id) and f.endswith('.log')]
-    except OSError: return None
+    # Mac 构建各阶段写 logs/<任务>/，起游戏等作业写 logs/<任务>-*.log；两种布局都查。
+    prefix = os.path.join(glob.escape(d), glob.escape(task_id))
+    fs = glob.glob(prefix + '*.log') + glob.glob(os.path.join(prefix, '*.log'))
+    fs = [f for f in fs if os.path.isfile(f)]
     return max(fs, key=os.path.getmtime) if fs else None
 
 def logs(ref, n):
@@ -559,6 +563,12 @@ def main():
         if rest: print(json.dumps(call('POST', '/update', {'action': rest[0]}), ensure_ascii=False))
         else: print(json.dumps(call('GET', '/state').get('update'), ensure_ascii=False))
         return
+    if cmd == 'display':
+        names = {'--fps60': 'fps60', '--widen': 'widenForce', '--metalfx': 'metalfx'}
+        body = {'gameId': rest[0]}
+        for flag, key in names.items():
+            if flag in rest: body[key] = rest[rest.index(flag) + 1] == 'on'
+        print(json.dumps(call('POST', '/display', body), ensure_ascii=False, indent=1)); return
     if cmd == 'library':
         before = {t['id'] for t in call('GET', '/state')['tasks']}
         call('POST', '/library', {'path': os.path.abspath(os.path.expanduser(rest[0])), 'move': '--move' in rest}); wait_op('setup', before); return
@@ -596,7 +606,7 @@ def main():
         wait(rest[0], op, lim); return
     simple = {
               'fonts': ('/fonts', lambda r: {'path': os.path.abspath(r[0]) if r and r[0] else ''}),
-              'prepare': ('/prepare', lambda r: {'gameId': r[0], **space_flag(r)}), 'ipa': ('/ipa', lambda r: {'gameId': r[0], **space_flag(r)}), 'install': ('/install', lambda r: {'gameId': r[0], **({'teamId': r[r.index('--team') + 1]} if '--team' in r else {})}), 'uninstall': ('/uninstall', lambda r: {'gameId': r[0]}), 'launch': ('/launch', lambda r: {'gameId': r[0]}),
+              'prepare': ('/prepare', lambda r: {'gameId': r[0], **space_flag(r)}), 'ipa': ('/ipa', lambda r: {'gameId': r[0], **space_flag(r)}), 'install': ('/install', lambda r: {'gameId': r[0], **({'teamId': r[r.index('--team') + 1]} if '--team' in r else {}), **({'device': r[r.index('--device') + 1]} if '--device' in r else {})}), 'uninstall': ('/uninstall', lambda r: {'gameId': r[0]}), 'launch': ('/launch', lambda r: {'gameId': r[0]}),
               'cancel': ('/cancel', lambda r: {'taskId': r[0]}), 'retry': ('/retry', lambda r: {'taskId': r[0]}),
               'select': ('/select', lambda r: {'selection': r[0], **({'gameId': r[1]} if len(r) > 1 else {})}),
               'onboarding': ('/onboarding', lambda r: {'action': r[0], **({'step': int(r[1])} if len(r) > 1 else {})}),

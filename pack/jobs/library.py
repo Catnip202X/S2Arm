@@ -583,7 +583,7 @@ def keys(c):
                     try:
                         inspect(c, candidate, icons, keyfile=temporary)
                     except Failure as error:
-                        if error.code != "content_truncated":
+                        if error.code not in KEYS_UNVERIFIABLE:   # 源文件自身的毛病只说明这次验不了，不是密钥坏（#242）
                             raise
                         del c.job["diagnostics"][diagnostics_before:]
                     else:
@@ -596,6 +596,8 @@ def keys(c):
     return dict(entries=count, verified=verified, message="已验证解密能力" if verified else "格式通过，首次读取游戏时验证解密能力")
 
 
+# 候选游戏文件自身有毛病（截断、缺票据）：密钥验不了，但不能据此判密钥无效；导入照常、记 verified=false，源文件错误留到读那款游戏时报
+KEYS_UNVERIFIABLE = ("content_truncated", "ticket_missing")
 KEYS_CANNOT_DECRYPT = ("无法读取游戏内容：可能是文件不完整、缺票据或密钥不匹配。请核对原始文件；"
                        "若已确认 Switch 密钥版本不足，再重新导出，到「设置 → 玩家密钥」重新导入。")
 
@@ -687,7 +689,7 @@ def pack_need_bytes(packages, unpacked=False, windows=None):
     size = _pack_input_bytes(packages)
     copy = size * 11 // 10
     windows = os.name == "nt" if windows is None else windows
-    return (0 if unpacked else copy) + (copy if windows else 0) + _pack_direct_bytes(size)
+    return (0 if unpacked else copy) + (copy if windows else 0) + copy + _pack_direct_bytes(size)   # 再加一份 copy：单文件镜像 romfs.img 是真实占盘的一份（pack/romfs_image.py）
 
 
 # 出包实测账（11-07 联合开发者旷野之息：外接盘 NX 剩 45 GB，经验门槛要 4x GB 拦下）：每次 Mac 打包 / 打 iPhone 包成功后，
@@ -896,6 +898,27 @@ def requirement_errors(c, game):
     return missing
 
 
+def source_identity(packages, size):
+    """原件身份（catalog 里的 sha256，64 位十六进制，判重 / 构建键 / 解包暂存名都用它）：按读取器给的各包 titleId、类型、版本与 NCA content ID
+    （任天堂按内容算的哈希）再加文件大小算，不读全文件——原先整份算 SHA-256，十几 GB 的原件放在机械盘 / U 盘上「只是添加」就要几分钟（11-09 玩家反馈）。
+    一个文件一个身份（同一个 XCI 里的本体与更新共用，下游按它去重）。读取器没给 content ID（NUP 容器、旧读取器）→ None，调用方照旧整份算"""
+    rows = []
+    for m in packages:
+        ids = m.get("contentIds")
+        if not isinstance(ids, list) or not ids or not all(isinstance(x, str) and re.fullmatch(r"[0-9a-f]{32}", x) for x in ids):
+            return None
+        rows.append([m["titleId"], m["type"], m["version"], sorted(ids)])
+    return hashlib.sha256(json.dumps(dict(v=1, packages=sorted(rows), size=size), separators=(",", ":")).encode()).hexdigest()
+
+
+def _same_package(p, metadata, sha, size):
+    """已在库里的同一份：身份相同；或 titleId、类型、版本、文件大小都相同——老记录的 sha256 是整份哈希、新导入按 content ID 算，两种都要认得
+    （老记录不改写：它进构建键，改了老游戏都得冷重出）"""
+    if p["titleId"] != metadata["titleId"]:
+        return False
+    return p["sha256"] == sha or (p.get("type") == metadata["type"] and p.get("version") == metadata["version"] and p.get("size") == size)
+
+
 def import_games(c):
     c.begin("检查导入文件")
     c.require_library()
@@ -946,8 +969,11 @@ def import_games(c):
             for i, source in enumerate(files):
                 c.begin("读取游戏信息", idx * 2 + 1, total * 2)
                 packages = nup_inspect(c, source, icons) if source.suffix.lower() == NUP_SUFFIX else inspect(c, source, icons)
-                c.begin("校验游戏文件", idx * 2 + 2, total * 2)
-                sha = digest(source, c.progress)
+                c.begin("校验游戏文件", idx * 2 + 2, total * 2)   # 读完元数据后文件不见了 / 读不了归在这一步（input_missing），同原先整份算哈希时
+                size = source.stat().st_size
+                sha = source_identity(packages, size)
+                if sha is None:   # 读取器没给 content ID：照旧整份算
+                    sha = digest(source, c.progress)
                 for metadata in packages:
                     tid = metadata["baseId"]
                     game = next((g for g in cat["games"] if g["id"] == tid), None)
@@ -955,7 +981,7 @@ def import_games(c):
                         game = dict(id=tid, name=metadata["name"] or tid, display="", packages=[], hidden=False)
                         cat["games"].append(game)
                     game["hidden"] = False
-                    same = [p for p in game["packages"] if p["sha256"] == sha and p["titleId"] == metadata["titleId"]]
+                    same = [p for p in game["packages"] if _same_package(p, metadata, sha, size)]
                     duplicate = bool(same)
                     for p in same:
                         # 同一份内容换了位置再放一次（挪了盘 / 改了文件夹）：改记新位置；复制进库的旧托管副本还在就照旧用（不改记成引用），
@@ -969,7 +995,7 @@ def import_games(c):
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copyfile(icon, target)
                         metadata.pop("icon", None)
-                        game["packages"].append(metadata | dict(path=str(source), sha256=sha, size=source.stat().st_size))
+                        game["packages"].append(metadata | dict(path=str(source), sha256=sha, size=size))
                         if metadata["name"]:
                             game["name"] = metadata["name"]
                     results.append(dict(id=tid, name=source.name, duplicate=duplicate))
@@ -1360,7 +1386,9 @@ def _residue_disposable(c, gid):
 
 def _keep_stage_logs(c, gid):
     """产物根里的阶段日志要跟着删：先拷进私有日志目录，失败后的诊断包还能带上（只拷文件，单份 8 MB 以内，最多 64 份）。"""
-    roots = [*(c.library / "iPhone" / gid).glob("roots/*@现行"), *(c.library / "iPhone" / gid).glob("work/pkg/product"), *(c.library / "cache" / gid).glob("*/roots/*@现行")]
+    roots = [*(c.library / "iPhone" / gid).glob("roots/*@现行"), *(c.library / "iPhone" / gid).glob("work/pkg/product"), *(c.library / "cache" / gid).glob("*/roots/*@现行"),
+             # 阶段失败时各阶段把自己的日志拷进产物根旁的 .failed/（如改写 pack/stage_rewrite.sh 的 <款>_<模块>.log）：玩家报出包超时 / 改写失败时要的就是它（#251 诊断包里没有）
+             *(c.library / "iPhone" / gid).glob("roots/.failed"), *(c.library / "cache" / gid).glob("*/roots/.failed")]
     dest = c.private / "logs" / (c.task + "-stages")
     count = 0
     for root in roots:
@@ -1386,19 +1414,34 @@ def clean_after_stop(c):
         c.diagnostic("清理中间产物没有完成，下次空闲时会再清：" + c.redact(str(error)), code="job_failed", severity="warning")
 
 
+def _residue(c):
+    """崩溃、断电、进程被杀留下的解包和中间产物 → [(游戏号, 有可删的中间产物, [半成品运行版本…])]，只列有东西的款。只读，不拿锁"""
+    found = []
+    for game in c.catalog()["games"]:
+        gid = game["id"]
+        out = c.library / "iPhone" / gid
+        stale = (c.library / "cache" / gid).exists() or (out.is_dir() and any(p.name not in (CONTAINER_KIT, SHELL_STAMP_NAME, "logs") and p.suffix != ".ipa" and not p.name.endswith("资源包") for p in out.iterdir()))
+        stale = stale and _residue_disposable(c, gid)
+        partials = list((c.library / "games" / gid / "releases").glob("*.partial"))
+        if stale or partials:
+            found.append((gid, stale, partials))
+    return found
+
+
 def sweep_residue(c):
-    """启动器空闲时扫掉崩溃、断电、进程被杀留下的解包和中间产物；有出包在跑时不动。"""
+    """启动器空闲时扫掉崩溃、断电、进程被杀留下的解包和中间产物；有出包在跑时不动。
+    先不拿锁扫一遍，真有残留才拿执行锁、锁内再扫一遍再删：catalog 每次读游戏库都调它，扫描期间占着执行锁的话，
+    紧接着开始的任务（起局、存档、出包）拿不到锁当场报「另一个任务正在使用游戏库」（11-09 main 守望红：SaveManagementTests 备份完刷新游戏库、查看存档撞锁）"""
     try:
+        if not _residue(c):
+            return
         with _execution_idle(c) as idle:
             if not idle:
                 return
-            for game in c.catalog()["games"]:
-                gid = game["id"]
-                out = c.library / "iPhone" / gid
-                stale = (c.library / "cache" / gid).exists() or (out.is_dir() and any(p.name not in (CONTAINER_KIT, SHELL_STAMP_NAME, "logs") and p.suffix != ".ipa" and not p.name.endswith("资源包") for p in out.iterdir()))
-                if stale and _residue_disposable(c, gid):
+            for gid, stale, partials in _residue(c):
+                if stale:
                     prune_build(c, gid, record=False)
-                for partial in (c.library / "games" / gid / "releases").glob("*.partial"):
+                for partial in partials:
                     _rm(c, c.library, partial)
     except (Failure, OSError, ValueError):
         pass   # 清不掉不影响读游戏库，下次再扫
@@ -1457,6 +1500,21 @@ def prune_build(c, gid, *, retain_compiler=True, record=True):
     return n
 
 
+def drop_from_container(c, gid):
+    """游戏库里删了的款也从游戏库侧的容器（iPhone/container/S2Arm.app，下次装机的底子）摘掉，不装机（#227：原先容器清单留着它，
+    下次装别的游戏把它原样带回来，升级换壳后又因为没有本壳产物挡住出包 container_stale）。手机上的 App 下次装机时随覆盖装去掉它"""
+    import ipa as packer
+    from install import CONTAINER_DIR
+    cat = c.library / "iPhone" / CONTAINER_DIR / "S2Arm.app/s2a_catalogue.json"
+    try:
+        listed = any(e.get("title_id") == gid for e in json.loads(cat.read_text(encoding="utf-8")).get("games", []))
+    except (OSError, ValueError):
+        return
+    if listed:
+        with packer.dropped(c, gid) as (ipa, _):
+            packer.commit_drop(c, ipa)
+
+
 def delete(c):
     """删除这款游戏（连出包产物与缓存）：iPhone 输出整个目录（IPA / 资源包 / 中间产物）、Mac 构建缓存、game_caches，并从游戏库清单里删掉；
     保留存档（library/saves/<程序号>）与游戏原件（原地导入的不碰；旧版复制进 library/sources 的托管副本另有「删除托管 NSP 副本」）。
@@ -1472,6 +1530,7 @@ def delete(c):
                         _rm(c, c.library, p)
                 for p in game_caches(c, gid):
                     _rm(c, c.work_root, p)
+                drop_from_container(c, gid)
                 cat = c.catalog()
                 cat["games"] = [g for g in cat["games"] if g["id"] != gid]
                 atomic(c.library / "catalog.json", cat)
