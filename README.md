@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/images/s2arm-wordmark.png" width="420" alt="S2Arm"></p>
 
+> **Branch `android/native-vp9`:** upstream S2Arm plus native VP9 decoding, so video cutscenes play at full speed on Android. See [ANDROID_NATIVE_VP9.md](ANDROID_NATIVE_VP9.md).
+
 **Your own Switch games, running natively on iPhone, iPad and Mac.** Game code is rewritten to native ARM64 and runs directly on the device's processor, with graphics going straight to Metal. Your whole library lives in one app, and a few clicks in the Mac or Windows launcher take a game from import to play.
 
 Platforms: iPhone / iPad (iOS / iPadOS 18 and later) · Mac (Apple silicon, macOS 15 and later) · Build on Mac or Windows · Android / HarmonyOS coming soon · License: Apache-2.0 · **Bring your own games**
