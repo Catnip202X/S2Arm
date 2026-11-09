@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # S2Arm 对 libvpx 的补丁（Nvdec 的 VP9 作业接口 vpx/s2a_vp9_nvdec.h，设计 docs/设计_原生VP9/design_phase2_B.md）。
 #   S2A_VPX_VARIANT=ship（缺省，打补丁）/ nopatch（不打补丁，只出 libvpx.a，给 tests/vpx_patch_identity_test.sh 对拍）；变体名与补丁内容都进 H1
 PATCH=$ROOT/services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch; VARIANT=${S2A_VPX_VARIANT:-ship}
-case $VARIANT in ship|nopatch) ;; *) echo "🔴 vpx：不认识的 S2A_VPX_VARIANT=$VARIANT（ship / nopatch）" >&2; exit 1 ;; esac
+case $VARIANT in ship|nopatch) ;; *) echo "🔴 vpx：不认识的 S2A_VPX_VARIANT=${VARIANT}（ship / nopatch）" >&2; exit 1 ;; esac
 source "$ROOT/android/tools/fetch_source.sh"   # 源码包按 sha256 进本机共享缓存（S2A_BUILD_CACHE/sources），命中不联网；下载按进展判挂死
 TCE=$ROOT/tools/toolchain.env; MMAC=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p' "$TCE"); MIOS=$(sed -n 's/^IPHONEOS_DEPLOYMENT_TARGET=//p' "$TCE")   # 产物下限只取统一工具链那两行
 [ -n "$MMAC" ] && [ -n "$MIOS" ] || { echo "🔴 $(basename "$(dirname "$0")")：$TCE 里没有部署目标" >&2; exit 1; }
@@ -41,7 +41,7 @@ if [ ! -s "$OUT/libvpx.a" ]; then
   TGZ=$(s2a_source_fetch "libvpx-$VER.tar.gz" "https://github.com/webmproject/libvpx/archive/refs/tags/v$VER.tar.gz" "$SHA") || { echo "🔴 vpx：取不到源码包" >&2; exit 1; }
   W=$OUT.tmp; rm -rf "$W"; mkdir -p "$W/src" "$W/obj"
   tar xzf "$TGZ" -C "$W/src" --strip-components 1
-  if [ "$VARIANT" != nopatch ]; then patch -p1 -s -d "$W/src" < "$PATCH" || { echo "🔴 vpx：补丁打不上（$PATCH）" >&2; exit 1; }; fi
+  if [ "$VARIANT" != nopatch ]; then patch -p1 -s -d "$W/src" < "$PATCH" || { echo "🔴 vpx：补丁打不上（${PATCH}）" >&2; exit 1; }; fi
   # 缓存在带空格目录（启动器：~/Library/Application Support）时 configure / make 拆路径：走无空格别名（tools/nospace.sh）
   source "$ROOT/tools/nospace.sh"; WN=$(s2a_nospace "$W")
   ( cd "$WN/obj" &&
