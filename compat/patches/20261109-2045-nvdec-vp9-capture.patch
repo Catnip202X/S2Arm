@@ -134,21 +134,21 @@ index 0000000000000000000000000000000000000000..98feaa28e3134ba987eba9e369051ca7
 +    }
 +}
 diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
-index 9474a86043da8ca6758ea3772afe6d3e02bd6683..84ef0efa3042da765a7ff3e3f8067cf81ca4c83f 100644
+index 9c5424414fe9b25b4e29fe030935a54c3a46f998..4194fc20b72997de0730eff2b06022da36096e0f 100644
 --- a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
 +++ b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
-@@ -59,7 +59,9 @@ namespace Ryujinx.Graphics.Nvdec
+@@ -94,7 +94,9 @@ namespace Ryujinx.Graphics.Nvdec
              uint lumaOffset = state.SetPictureLumaOffset[3];
              uint chromaOffset = state.SetPictureChromaOffset[3];
  
--            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
-+            bool decoded = _decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut);
+-            if (decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
++            bool decoded = decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut);
 +
 +            if (decoded)
              {
                  SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
  
-@@ -72,6 +74,25 @@ namespace Ryujinx.Graphics.Nvdec
+@@ -107,6 +109,25 @@ namespace Ryujinx.Graphics.Nvdec
  
              WriteBackwardUpdates(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, ref info.BackwardUpdateCounts);
  
